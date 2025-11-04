@@ -63,7 +63,7 @@ void process_first_vmexit()
 
 
 
-std::uint64_t vmexit_handler_detour(const std::uint64_t a1, const std::uint64_t a2, const std::uint64_t a3, const std::uint64_t a4)
+std::uint64_t vmexit_handler_detour(std::uint64_t a1,  std::uint64_t a2,  std::uint64_t a3,  std::uint64_t a4)
 {
     process_first_vmexit();
 
@@ -110,8 +110,17 @@ std::uint64_t vmexit_handler_detour(const std::uint64_t a1, const std::uint64_t 
 #ifdef _INTELMACHINE
             //cli_func();
             //todo::need fix
+            //trap_frame_log_t log;
+            //log.stack_data[0] = a1;
+            //log.stack_data[1] = a2;
+            //log.stack_data[2] = a3;
+            //log.stack_data[3] = a4;
+            //logs::add_log(log);
             vmwrite(VMCS_EXIT_REASON, VMX_EXIT_REASON_EXECUTE_PAUSE);//Pause 
             vmwrite(VMCS_VMEXIT_INSTRUCTION_LENGTH, 0);//No longer inject RIP
+            a2 = VMX_EXIT_REASON_EXECUTE_PAUSE;
+            a3 = VMX_EXIT_REASON_EXECUTE_PAUSE;
+            //return 0;
             goto end;
 #else
             vmcb_t* const vmcb = arch::get_vmcb();
