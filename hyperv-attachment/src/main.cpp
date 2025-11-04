@@ -111,7 +111,8 @@ std::uint64_t vmexit_handler_detour(const std::uint64_t a1, const std::uint64_t 
 #ifdef _INTELMACHINE
             //cli_func();
             //todo::need fix
-            vmwrite(VMCS_EXIT_REASON, VMX_EXIT_REASON_EXECUTE_PAUSE);
+            vmwrite(VMCS_EXIT_REASON, VMX_EXIT_REASON_EXECUTE_PAUSE);//Pause 
+            vmwrite(VMCS_VMEXIT_INSTRUCTION_LENGTH, 0);//No longer inject RIP
             goto end;
 #else
             vmcb_t* const vmcb = arch::get_vmcb();
