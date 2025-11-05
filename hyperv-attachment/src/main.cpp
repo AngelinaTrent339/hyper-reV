@@ -70,7 +70,6 @@ void process_first_vmexit()
 
 std::uint64_t vmexit_handler_detour(std::uint64_t a1,  std::uint64_t a2,  std::uint64_t a3,  std::uint64_t a4)
 {
-    clgi_func();
     process_first_vmexit();
 
     const std::uint64_t exit_reason = arch::get_vmexit_reason();
@@ -131,8 +130,8 @@ std::uint64_t vmexit_handler_detour(std::uint64_t a1,  std::uint64_t a2,  std::u
 #else
             vmcb_t* const vmcb = arch::get_vmcb();
             vmcb->control.vmexit_reason = SVM_EXIT_SMI;
-            vmcb->control.tlb_control = tlb_control_t::do_not_flush;
-            vmcb->control.clean.flags = 0xffffffff;
+            //vmcb->control.tlb_control = tlb_control_t::do_not_flush;
+            //vmcb->control.clean.flags = 0xffffffff;
             goto end;
 #endif
         }
