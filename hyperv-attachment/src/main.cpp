@@ -14,9 +14,9 @@
 #include "slat/cr3/cr3.h"
 #include "slat/violation/violation.h"
 
-#ifndef _INTELMACHINE
+
 #include <intrin.h>
-#endif
+
 extern "C" void cli_func(void);
 extern "C" void sti_func(void);
 
@@ -70,6 +70,13 @@ void process_first_vmexit()
 
 std::uint64_t vmexit_handler_detour(std::uint64_t a1,  std::uint64_t a2,  std::uint64_t a3,  std::uint64_t a4)
 {
+
+#ifdef _INTELMACHINE
+
+#else
+    //24H2开启了中断
+    __svm_clgi();
+#endif
     process_first_vmexit();
 
     const std::uint64_t exit_reason = arch::get_vmexit_reason();
@@ -103,14 +110,22 @@ std::uint64_t vmexit_handler_detour(std::uint64_t a1,  std::uint64_t a2,  std::u
             arch::set_guest_rsp(trap_frame->rsp);
             arch::advance_guest_rip();
 
-            goto callexit;
 
+#ifdef _INTELMACHINE
+
+#else
+            //24H2开启了中断
+            vmcb->control.vmexit_reason = SVM_EXIT_SMI;
+            vmcb->control.tlb_control = tlb_control_t::do_not_flush;
+            vmcb->control.clean.flags = 0xffffffff;
+            __svm_stgi();
+            return __readgsqword(0);
+#endif
 
         }
     }
     else if (arch::is_slat_violation(exit_reason) == 1 && slat::violation::process() == 1)
     {
-        callexit:
         {
 #ifdef _INTELMACHINE
             //cli_func();
@@ -128,11 +143,12 @@ std::uint64_t vmexit_handler_detour(std::uint64_t a1,  std::uint64_t a2,  std::u
             //return 0;
             goto end;
 #else
-            vmcb_t* const vmcb = arch::get_vmcb();
-            vmcb->control.vmexit_reason = SVM_EXIT_SMI;
+            vmcb_t* vmcb = arch::get_vmcb();
+            //vmcb->control.vmexit_reason = SVM_EXIT_SMI;
             //vmcb->control.tlb_control = tlb_control_t::do_not_flush;
             //vmcb->control.clean.flags = 0xffffffff;
-            goto end;
+            __svm_stgi();
+            return __readgsqword(0);
 #endif
         }
     }
@@ -140,7 +156,8 @@ std::uint64_t vmexit_handler_detour(std::uint64_t a1,  std::uint64_t a2,  std::u
     {
         interrupts::process_nmi();
     }
-end:
+
+    __svm_stgi();
     return reinterpret_cast<vmexit_handler_t>(original_vmexit_handler)(a1, a2, a3, a4);
 }
 
