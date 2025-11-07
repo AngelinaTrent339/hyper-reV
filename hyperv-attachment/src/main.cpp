@@ -141,8 +141,7 @@ std::uint64_t vmexit_handler_detour(std::uint64_t a1,  std::uint64_t a2,  std::u
             vmcb->control.vmexit_reason = SVM_EXIT_REASON_PHYSICAL_NMI;
             //vmcb->control.tlb_control = tlb_control_t::do_not_flush;
             //vmcb->control.clean.flags = 0xffffffff;
-            __svm_stgi();
-            return __readgsqword(0);
+            goto END;
 #endif
         }
     }
