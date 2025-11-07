@@ -257,6 +257,7 @@ union npf_exit_info_1
 };
 
 #pragma warning(pop)
+#define VMCB_CLEAN_ALL_VALUE 0x7FFFFFFF
 
 #define SVM_EXIT_REASON_PHYSICAL_NMI 0x61
 #define SVM_EXIT_REASON_CPUID 0x72

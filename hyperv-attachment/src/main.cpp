@@ -68,6 +68,39 @@ void process_first_vmexit()
 
 
 
+std::uint64_t amd_handler(vmcb_t* vmcb,std::uint64_t a1, std::uint64_t a2, std::uint64_t a3, std::uint64_t a4) {
+#ifndef _INTELMACHINE
+
+    auto exitcode = vmcb->control.vmexit_reason;
+    auto tlb = (std::uint32_t)vmcb->control.tlb_control;
+    auto eventInj = vmcb->control.eventInj;
+    auto ourClean = vmcb->control.clean.flags & VMCB_CLEAN_ALL_VALUE;
+    vmcb->control.vmexit_reason = SVM_EXIT_REASON_PHYSICAL_NMI;
+    vmcb->control.tlb_control = tlb_control_t::do_not_flush;
+    vmcb->control.clean.flags = 0xffffffffLL;
+  
+    auto rel = reinterpret_cast<vmexit_handler_t>(original_vmexit_handler)(a1, a2, a3, a4);
+    vmcb->control.vmexit_reason = exitcode;
+    auto hvaxTlb = (std::uint32_t)vmcb->control.tlb_control;
+    if (tlb && hvaxTlb) { 
+        vmcb->control.tlb_control = (tlb_control_t)(((hvaxTlb) < (tlb)) ? (hvaxTlb) : (tlb));
+    }
+    else {
+        vmcb->control.tlb_control = (tlb_control_t)(tlb ? tlb : hvaxTlb);
+    }
+    auto hvaxClean = vmcb->control.clean.flags & VMCB_CLEAN_ALL_VALUE;
+    auto newClean = 0xffffffffLL;
+    for (int i = 0; i < 31; ++i) {
+        if (!(ourClean & (1 << i)) || !(hvaxClean & (1 << i))) {
+            newClean &= (VMCB_CLEAN_ALL_VALUE & ~(1 << i)) | (1 << 31);
+        }
+    }
+    vmcb->control.clean.flags = newClean;
+    return rel;
+#endif
+    return 0;
+}
+
 std::uint64_t vmexit_handler_detour(std::uint64_t a1,  std::uint64_t a2,  std::uint64_t a3,  std::uint64_t a4)
 {
 
@@ -118,11 +151,8 @@ std::uint64_t vmexit_handler_detour(std::uint64_t a1,  std::uint64_t a2,  std::u
             a3 = VMX_EXIT_REASON_EPT_MISCONFIGURATION;
             goto END;
 #else
-            vmcb->control.vmexit_reason = SVM_EXIT_REASON_PHYSICAL_NMI;
-            vmcb->control.tlb_control = tlb_control_t::do_not_flush;
-            vmcb->control.clean.flags = 0xffffffff;
-            goto END;
-           
+            __svm_stgi();
+            return amd_handler(arch::get_vmcb(),a1,a2,a3,a4);
 #endif
 
         }
@@ -137,11 +167,8 @@ std::uint64_t vmexit_handler_detour(std::uint64_t a1,  std::uint64_t a2,  std::u
             a3 = VMX_EXIT_REASON_EPT_MISCONFIGURATION;
             goto END;
 #else
-            vmcb_t* vmcb = arch::get_vmcb();
-            vmcb->control.vmexit_reason = SVM_EXIT_REASON_PHYSICAL_NMI;
-            //vmcb->control.tlb_control = tlb_control_t::do_not_flush;
-            //vmcb->control.clean.flags = 0xffffffff;
-            goto END;
+            __svm_stgi();
+            return amd_handler(arch::get_vmcb(), a1, a2, a3, a4);
 #endif
         }
     }
