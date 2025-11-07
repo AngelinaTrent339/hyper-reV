@@ -112,17 +112,17 @@ std::uint64_t vmexit_handler_detour(std::uint64_t a1,  std::uint64_t a2,  std::u
 
 
 #ifdef _INTELMACHINE
-
-
-            _enable();
-            return 0;
+            vmwrite(VMCS_EXIT_REASON, VMX_EXIT_REASON_EXECUTE_PAUSE);//Pause 
+            vmwrite(VMCS_VMEXIT_INSTRUCTION_LENGTH, 0);//No longer inject RIP
+            a2 = VMX_EXIT_REASON_EXECUTE_PAUSE;
+            a3 = VMX_EXIT_REASON_EXECUTE_PAUSE;
+            goto END;
 #else
-            //24H2开启了中断
-            //vmcb->control.vmexit_reason = SVM_EXIT_SMI;
-            //vmcb->control.tlb_control = tlb_control_t::do_not_flush;
-            //vmcb->control.clean.flags = 0xffffffff;
-            __svm_stgi();
-            return __readgsqword(0);
+            vmcb->control.vmexit_reason = SVM_EXIT_SMI;
+            vmcb->control.tlb_control = tlb_control_t::do_not_flush;
+            vmcb->control.clean.flags = 0xffffffff;
+            goto END;
+           
 #endif
 
         }
@@ -131,18 +131,6 @@ std::uint64_t vmexit_handler_detour(std::uint64_t a1,  std::uint64_t a2,  std::u
     {
         {
 #ifdef _INTELMACHINE
-            //cli_func();
-            //todo::need fix
-            //trap_frame_log_t log;
-            //log.stack_data[0] = a1;
-            //log.stack_data[1] = a2;
-            //log.stack_data[2] = a3;
-            //log.stack_data[3] = a4;
-            //logs::add_log(log);
-            vmwrite(VMCS_EXIT_REASON, VMX_EXIT_REASON_EXECUTE_PAUSE);//Pause 
-            vmwrite(VMCS_VMEXIT_INSTRUCTION_LENGTH, 0);//No longer inject RIP
-            a2 = VMX_EXIT_REASON_EXECUTE_PAUSE;
-            a3 = VMX_EXIT_REASON_EXECUTE_PAUSE;
             _enable();
             return 0;
 #else
