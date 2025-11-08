@@ -68,9 +68,9 @@ void process_first_vmexit()
 
 
 
-std::uint64_t amd_handler(vmcb_t* vmcb,std::uint64_t a1, std::uint64_t a2, std::uint64_t a3, std::uint64_t a4) {
+std::uint64_t exit_handler(std::uint64_t a1, std::uint64_t a2, std::uint64_t a3, std::uint64_t a4) {
 #ifndef _INTELMACHINE
-
+    vmcb_t* vmcb = arch::get_vmcb();
     auto exitcode = vmcb->control.vmexit_reason;
     auto tlb = (std::uint32_t)vmcb->control.tlb_control;
     auto eventInj = vmcb->control.eventInj;
@@ -97,19 +97,22 @@ std::uint64_t amd_handler(vmcb_t* vmcb,std::uint64_t a1, std::uint64_t a2, std::
     }
     vmcb->control.clean.flags = newClean;
     return rel;
+#else
+    vmwrite(VMCS_EXIT_REASON, VMX_EXIT_REASON_EPT_MISCONFIGURATION);
+    vmwrite(VMCS_VMEXIT_INSTRUCTION_LENGTH, 0);
+    a2 = VMX_EXIT_REASON_EPT_MISCONFIGURATION;
+    a3 = VMX_EXIT_REASON_EPT_MISCONFIGURATION;
+    auto rel = reinterpret_cast<vmexit_handler_t>(original_vmexit_handler)(a1, a2, a3, a4);
+
+
+    return rel;
 #endif
-    return 0;
+    
 }
 
 std::uint64_t vmexit_handler_detour(std::uint64_t a1,  std::uint64_t a2,  std::uint64_t a3,  std::uint64_t a4)
 {
 
-#ifdef _INTELMACHINE
-    _disable();
-#else
-    //24H2开启了中断
-    __svm_clgi();
-#endif
     process_first_vmexit();
 
     const std::uint64_t exit_reason = arch::get_vmexit_reason();
@@ -143,48 +146,19 @@ std::uint64_t vmexit_handler_detour(std::uint64_t a1,  std::uint64_t a2,  std::u
             arch::set_guest_rsp(trap_frame->rsp);
             arch::advance_guest_rip();
 
-
-#ifdef _INTELMACHINE
-            vmwrite(VMCS_EXIT_REASON, VMX_EXIT_REASON_EPT_MISCONFIGURATION);//Pause 
-            vmwrite(VMCS_VMEXIT_INSTRUCTION_LENGTH, 0);//No longer inject RIP
-            a2 = VMX_EXIT_REASON_EPT_MISCONFIGURATION;
-            a3 = VMX_EXIT_REASON_EPT_MISCONFIGURATION;
-            goto END;
-#else
-            __svm_stgi();
-            return amd_handler(arch::get_vmcb(),a1,a2,a3,a4);
-#endif
-
+            return exit_handler(a1,a2,a3,a4);
         }
     }
     else if (arch::is_slat_violation(exit_reason) == 1 && slat::violation::process() == 1)
     {
-        {
-#ifdef _INTELMACHINE
-            vmwrite(VMCS_EXIT_REASON, VMX_EXIT_REASON_EPT_MISCONFIGURATION);//Pause 
-            vmwrite(VMCS_VMEXIT_INSTRUCTION_LENGTH, 0);//No longer inject RIP
-            a2 = VMX_EXIT_REASON_EPT_MISCONFIGURATION;
-            a3 = VMX_EXIT_REASON_EPT_MISCONFIGURATION;
-            goto END;
-#else
-            __svm_stgi();
-            return amd_handler(arch::get_vmcb(), a1, a2, a3, a4);
-#endif
-        }
+        return exit_handler(a1, a2, a3, a4);
     }
     else if (arch::is_non_maskable_interrupt_exit(exit_reason) == 1)
     {
         interrupts::process_nmi();
     }
+    return reinterpret_cast<vmexit_handler_t>(original_vmexit_handler)(a1, a2, a3, a4);
 
-END:
-#ifdef _INTELMACHINE
-    _enable();
-    return reinterpret_cast<vmexit_handler_t>(original_vmexit_handler)(a1, a2, a3, a4);
-#else
-    __svm_stgi();
-    return reinterpret_cast<vmexit_handler_t>(original_vmexit_handler)(a1, a2, a3, a4);
-#endif
    
 }
 
