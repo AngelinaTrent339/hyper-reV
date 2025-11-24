@@ -47,6 +47,8 @@ void slat::set_cr3(const cr3 slat_cr3)
 void slat::flush_current_logical_processor_cache(const std::uint8_t has_slat_cr3_changed)
 {
 #ifdef _INTELMACHINE
+	(void)has_slat_cr3_changed;
+
 	invalidate_ept_mappings(invept_type::invept_all_context, { });
 #else
 	vmcb_t* const vmcb = arch::get_vmcb();

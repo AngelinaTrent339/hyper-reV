@@ -11,10 +11,8 @@ namespace slat::hook
 		std::uint64_t original_write_access_ : 1;
 		std::uint64_t original_execute_access_ : 1;
 		std::uint64_t paging_split_state_ : 1;
-		std::uint64_t reserved_ : 4;
-
 		std::uint64_t original_pfn_ : 36;
-		std::uint64_t shadow_pfn_ : 36;
+		std::uint64_t reserved_ : 40;
 
 	public:
 		[[nodiscard]] entry_t* next() const;
@@ -22,9 +20,6 @@ namespace slat::hook
 
 		[[nodiscard]] std::uint64_t original_pfn() const;
 		void set_original_pfn(std::uint64_t original_pfn);
-
-		[[nodiscard]] std::uint64_t shadow_pfn() const;
-		void set_shadow_pfn(std::uint64_t shadow_pfn);
 
 		[[nodiscard]] std::uint64_t original_read_access() const;
 		[[nodiscard]] std::uint64_t original_write_access() const;

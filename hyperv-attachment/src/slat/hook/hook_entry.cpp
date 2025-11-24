@@ -3,10 +3,10 @@
 
 slat::hook::entry_t* slat::hook::entry_t::next() const
 {
-	return reinterpret_cast<hook::entry_t*>(next_);
+	return reinterpret_cast<entry_t*>(next_);
 }
 
-void slat::hook::entry_t::set_next(hook::entry_t* const next_entry)
+void slat::hook::entry_t::set_next(entry_t* const next_entry)
 {
 	next_ = reinterpret_cast<std::uint64_t>(next_entry);
 }
@@ -19,16 +19,6 @@ std::uint64_t slat::hook::entry_t::original_pfn() const
 void slat::hook::entry_t::set_original_pfn(const std::uint64_t original_pfn)
 {
 	original_pfn_ = original_pfn;
-}
-
-std::uint64_t slat::hook::entry_t::shadow_pfn() const
-{
-	return shadow_pfn_;
-}
-
-void slat::hook::entry_t::set_shadow_pfn(const std::uint64_t shadow_pfn)
-{
-	shadow_pfn_ = shadow_pfn;
 }
 
 std::uint64_t slat::hook::entry_t::original_read_access() const

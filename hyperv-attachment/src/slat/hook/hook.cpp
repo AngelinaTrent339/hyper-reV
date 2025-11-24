@@ -18,9 +18,6 @@
 namespace
 {
 	crt::mutex_t hook_mutex = { };
-
-	slat::hook::entry_t* available_hook_list_head = nullptr;
-	slat::hook::entry_t* used_hook_list_head = nullptr;
 }
 
 static void process_first_slat_hook()
@@ -49,13 +46,11 @@ void slat::hook::set_up_entries()
 	{
 		current_entry->set_next(current_entry + 1);
 		current_entry->set_original_pfn(0);
-		current_entry->set_shadow_pfn(0);
 
 		current_entry = current_entry->next();
 	}
 
 	current_entry->set_original_pfn(0);
-	current_entry->set_shadow_pfn(0);
 	current_entry->set_next(nullptr);
 }
 
@@ -126,15 +121,16 @@ std::uint64_t slat::hook::add(const virtual_address_t target_guest_physical_addr
 
 	hook_entry->set_next(used_hook_list_head);
 	hook_entry->set_original_pfn(target_pte->page_frame_number);
-	hook_entry->set_shadow_pfn(shadow_page_host_physical_address >> 12);
 	hook_entry->set_paging_split_state(paging_split_state);
+
+	used_hook_list_head = hook_entry;
 
 #ifdef _INTELMACHINE
 	hook_entry->set_original_read_access(target_pte->read_access);
 	hook_entry->set_original_write_access(target_pte->write_access);
 	hook_entry->set_original_execute_access(target_pte->execute_access);
 
-	target_pte->page_frame_number = hook_entry->shadow_pfn();
+	target_pte->page_frame_number = shadow_page_host_physical_address >> 12;
 	target_pte->execute_access = 1;
 	target_pte->read_access = 0;
 	target_pte->write_access = 0;
@@ -146,14 +142,12 @@ std::uint64_t slat::hook::add(const virtual_address_t target_guest_physical_addr
 	hook_entry->set_original_execute_access(!target_pte->execute_disable);
 
 	hook_target_pte->execute_disable = 0;
-	hook_target_pte->page_frame_number = hook_entry->shadow_pfn();
+	hook_target_pte->page_frame_number = shadow_page_host_physical_address >> 12;
 
 	fix_split_instructions(hook_cr3(), target_guest_physical_address);
 
 	target_pte->execute_disable = 1;
 #endif
-
-	used_hook_list_head = hook_entry;
 
 	hook_mutex.release();
 
@@ -229,16 +223,16 @@ void clean_up_hook_entry(slat::hook::entry_t* const hook_entry, slat::hook::entr
 {
 	if (previous_hook_entry == nullptr)
 	{
-		used_hook_list_head = hook_entry->next();
+		slat::hook::used_hook_list_head = hook_entry->next();
 	}
 	else
 	{
 		previous_hook_entry->set_next(hook_entry->next());
 	}
 
-	hook_entry->set_next(available_hook_list_head);
+	hook_entry->set_next(slat::hook::available_hook_list_head);
 
-	available_hook_list_head = hook_entry;
+	slat::hook::available_hook_list_head = hook_entry;
 }
 
 std::uint64_t slat::hook::remove(const virtual_address_t guest_physical_address)
