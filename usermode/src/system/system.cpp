@@ -923,24 +923,5 @@ std::uint64_t get_module_export(std::uint64_t cr3, std::uint64_t module_base,
         for (std::uint64_t addr = current_addr; addr < end_addr;
              addr += chunk_size) {
           std::uint64_t read_size = std::min(chunk_size, end_addr - addr);
-          hypercall::read_guest_virtual_memory(buffer.data(), addr, cr3,
-                                               read_size);
-
-          std::uint64_t consecutive = 0;
-          for (std::uint64_t j = 0; j < read_size; ++j) {
-            if (buffer[j] == 0xCC) {
-              consecutive++;
-              if (consecutive >= size) {
-                return addr + j - size + 1;
-              }
-            } else {
-              consecutive = 0;
-            }
-          }
         }
-      }
-    }
-
-    return 0;
-  }
-} // namespace sys
+      } // namespace sys
