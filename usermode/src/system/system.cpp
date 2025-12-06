@@ -531,20 +531,26 @@ std::optional<process_info_t> get_process_by_name(std::string_view name) {
   const std::string_view ntoskrnl_name = "ntoskrnl.exe";
 
   if (kernel::modules_list.contains(ntoskrnl_name.data()) == false) {
+    std::println("DEBUG: ntoskrnl.exe not found in modules_list");
     return std::nullopt;
   }
 
+  std::string ps_isp_name =
+      std::string(ntoskrnl_name) + "!PsInitialSystemProcess";
   const std::uint64_t ps_initial_system_process_address =
-      kernel::modules_list[ntoskrnl_name.data()]
-          .exports["PsInitialSystemProcess"];
+      kernel::modules_list[ntoskrnl_name.data()].exports[ps_isp_name];
 
   if (ps_initial_system_process_address == 0) {
+    std::println("DEBUG: PsInitialSystemProcess export not found");
     return std::nullopt;
   }
 
   const std::uint64_t system_process =
       read_kernel_virtual_memory<std::uint64_t>(
           ps_initial_system_process_address);
+
+  std::println("DEBUG: PsInitialSystemProcess: 0x{:X}, SystemProc: 0x{:X}",
+               ps_initial_system_process_address, system_process);
 
   std::uint64_t current_process = system_process;
 
@@ -555,12 +561,20 @@ std::optional<process_info_t> get_process_by_name(std::string_view name) {
   constexpr std::uint64_t eprocess_peb = 0x550;
   constexpr std::uint64_t eprocess_image_file_name = 0x5a8;
 
+  int debug_count = 0;
+
   do {
     char image_file_name[16] = {};
 
     hypercall::read_guest_virtual_memory(
         image_file_name, current_process + eprocess_image_file_name,
         current_cr3, 15);
+
+    if (debug_count < 5) {
+      std::println("DEBUG: Scanned Process: '{}' at 0x{:X}", image_file_name,
+                   current_process);
+      debug_count++;
+    }
 
     if (name == image_file_name) {
       process_info_t process_info = {};
@@ -572,6 +586,8 @@ std::optional<process_info_t> get_process_by_name(std::string_view name) {
       process_info.peb = read_virtual_memory_with_cr3<std::uint64_t>(
           current_process + eprocess_peb, current_cr3);
       process_info.name = image_file_name;
+
+      std::println("DEBUG: Found target process!");
 
       return process_info;
     }
@@ -586,6 +602,7 @@ std::optional<process_info_t> get_process_by_name(std::string_view name) {
 
   } while (current_process != system_process);
 
+  std::println("DEBUG: Process traversal finished, process not found.");
   return std::nullopt;
 }
 
