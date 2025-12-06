@@ -8,6 +8,9 @@
 #include <array>
 #include <print>
 
+#define NOMINMAX
+#include <Windows.h>
+
 #define d_invoke_command_processor(command) process_##command(##command)
 #define d_initial_process_command(command)                                     \
   if (*##command)                                                              \
@@ -475,6 +478,31 @@ void process_auh(CLI::App *auh) {
 
   std::vector<uint8_t> asm_bytes =
       get_command_option<std::vector<uint8_t>>(auh, "--asmbytes");
+
+  // Force pages to be resident
+  HANDLE hProcess =
+      OpenProcess(PROCESS_VM_READ, FALSE, static_cast<DWORD>(proc.id));
+  if (hProcess) {
+    char buffer;
+    SIZE_T bytesRead;
+    bool target_touched = ReadProcessMemory(
+        hProcess, reinterpret_cast<LPCVOID>(target_va), &buffer, 1, &bytesRead);
+    bool holder_touched = ReadProcessMemory(
+        hProcess, reinterpret_cast<LPCVOID>(holder_va), &buffer, 1, &bytesRead);
+
+    if (!target_touched)
+      std::println("Warning: Failed to touch target VA (Error: {})",
+                   GetLastError());
+    if (!holder_touched)
+      std::println("Warning: Failed to touch holder VA (Error: {})",
+                   GetLastError());
+
+    CloseHandle(hProcess);
+  } else {
+    std::println(
+        "Warning: Failed to open process (ID: {}) to touch memory. Error: {}",
+        proc.id, GetLastError());
+  }
   const std::vector<uint8_t> post_original_asm_bytes =
       get_command_option<std::vector<uint8_t>>(auh, "--post_original_asmbytes");
   const std::uint8_t monitor = get_command_flag(auh, "--monitor");

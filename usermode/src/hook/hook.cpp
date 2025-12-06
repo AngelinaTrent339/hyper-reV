@@ -3,13 +3,11 @@
 #include "../system/system.h"
 #include "kernel_detour_holder.h"
 
-
 #include <Windows.h>
 #include <array>
 #include <memory_resource>
 #include <print>
 #include <vector>
-
 
 #include "hook_disassembly.h"
 
@@ -343,8 +341,11 @@ hook::add_user_hook(std::uint64_t target_cr3,
   std::uint64_t routine_to_hook_physical =
       hypercall::translate_guest_virtual_address(routine_to_hook_virtual,
                                                  target_cr3);
-  if (routine_to_hook_physical == 0)
+  if (routine_to_hook_physical == 0) {
+    std::println("DEBUG: Failed to translate target VA 0x{:X}",
+                 routine_to_hook_virtual);
     return 0;
+  }
 
   const std::uint64_t page_offset = routine_to_hook_virtual & 0xFFF;
   const std::uint64_t hook_end =
@@ -354,15 +355,19 @@ hook::add_user_hook(std::uint64_t target_cr3,
   // 2. Allocate Shadow Target Page (in our process)
   void *shadow_page_virtual = sys::user::allocate_locked_memory(
       is_overflow_hook == 1 ? 0x2000 : 0x1000, PAGE_READWRITE);
-  if (shadow_page_virtual == nullptr)
+  if (shadow_page_virtual == nullptr) {
+    std::println("DEBUG: Failed to allocate shadow page");
     return 0;
+  }
 
   std::uint64_t shadow_page_physical =
       hypercall::translate_guest_virtual_address(
           reinterpret_cast<std::uint64_t>(shadow_page_virtual),
           sys::current_cr3);
-  if (shadow_page_physical == 0)
+  if (shadow_page_physical == 0) {
+    std::println("DEBUG: Failed to translate shadow page VA");
     return 0;
+  }
 
   // 3. Load Original Bytes from Target
   std::pair<std::vector<std::uint8_t>, std::uint64_t> original_bytes =
@@ -370,31 +375,49 @@ hook::add_user_hook(std::uint64_t target_cr3,
           static_cast<std::uint8_t *>(shadow_page_virtual),
           routine_to_hook_virtual, target_cr3, is_overflow_hook,
           extra_assembled_bytes.size() + post_original_assembled_bytes.size());
-  if (original_bytes.first.empty() == true)
+  if (original_bytes.first.empty() == true) {
+    std::println("DEBUG: Failed to load original bytes");
     return 0;
+  }
 
   // 4. Translate Holder VA to PA
+  // Try to touch/read holder first to ensure paging?
+  char dummy_byte;
+  hypercall::read_guest_virtual_memory(&dummy_byte, holder_virtual, target_cr3,
+                                       1);
+
   std::uint64_t holder_physical =
       hypercall::translate_guest_virtual_address(holder_virtual, target_cr3);
-  if (holder_physical == 0)
+  if (holder_physical == 0) {
+    std::println("DEBUG: Failed to translate holder VA 0x{:X}", holder_virtual);
     return 0;
+  }
 
   // 5. Allocate Shadow Holder Page
   void *shadow_holder_virtual =
       sys::user::allocate_locked_memory(0x1000, PAGE_READWRITE);
-  if (shadow_holder_virtual == nullptr)
+  if (shadow_holder_virtual == nullptr) {
+    std::println("DEBUG: Failed to allocate shadow holder");
     return 0;
+  }
 
   std::uint64_t shadow_holder_physical =
       hypercall::translate_guest_virtual_address(
           reinterpret_cast<std::uint64_t>(shadow_holder_virtual),
           sys::current_cr3);
-  if (shadow_holder_physical == 0)
+  if (shadow_holder_physical == 0) {
+    std::println("DEBUG: Failed to translate shadow holder");
     return 0;
+  }
 
   // 6. Copy Holder Page content (so we don't zero out rest of page)
-  hypercall::read_guest_virtual_memory(
+  std::uint64_t bytes_read = hypercall::read_guest_virtual_memory(
       shadow_holder_virtual, holder_virtual & ~0xFFF, target_cr3, 0x1000);
+  if (bytes_read != 0x1000) {
+    std::println(
+        "DEBUG: Warning: Failed to read holder page content fully (0x{:X})",
+        bytes_read);
+  }
 
   // 7. Construct Detour trampoline (Original + JMP Back)
   std::array<std::uint8_t, 14> return_to_original_bytes = {
@@ -426,8 +449,10 @@ hook::add_user_hook(std::uint64_t target_cr3,
 
   // 8. Write Trampoline to Shadow Holder
   std::uint64_t holder_page_offset = holder_virtual & 0xFFF;
-  if (holder_page_offset + hook_handler_bytes.size() > 0x1000)
+  if (holder_page_offset + hook_handler_bytes.size() > 0x1000) {
+    std::println("DEBUG: Holder trampoline checks failed");
     return 0; // Boundary check
+  }
 
   memcpy(static_cast<std::uint8_t *>(shadow_holder_virtual) +
              holder_page_offset,
@@ -444,24 +469,31 @@ hook::add_user_hook(std::uint64_t target_cr3,
                          is_overflow_hook,
                          overflow_shadow_page_physical_address,
                          overflow_original_page_physical_address) == 0) {
+    std::println("DEBUG: set_up_inline_hook failed");
     return 0;
   }
 
   // 10. Add SLAT Hooks
   if (hypercall::add_slat_code_hook(routine_to_hook_physical,
-                                    shadow_page_physical) == 0)
+                                    shadow_page_physical) == 0) {
+    std::println("DEBUG: add_slat_code_hook for target failed");
     return 0;
+  }
 
   if (overflow_shadow_page_physical_address != 0) {
     if (hypercall::add_slat_code_hook(overflow_original_page_physical_address,
                                       overflow_shadow_page_physical_address) ==
-        0)
+        0) {
+      std::println("DEBUG: add_slat_code_hook for overflow failed");
       return 0;
+    }
   }
 
   if (hypercall::add_slat_code_hook(holder_physical, shadow_holder_physical) ==
-      0)
+      0) {
+    std::println("DEBUG: add_slat_code_hook for holder failed");
     return 0;
+  }
 
   // Note: We need to cleanup these if we want to remove hook. user_hook_list
   // needed? For now, no cleanup tracking for user hooks.
