@@ -732,7 +732,7 @@ std::optional<process_info_t> get_process_by_name(std::string_view name) {
   constexpr std::uint64_t eprocess_image_file_name = 0x5a8;
 
   do {
-    char image_file_name[15] = {};
+    char image_file_name[16] = {};
 
     hypercall::read_guest_virtual_memory(
         image_file_name, current_process + eprocess_image_file_name,
