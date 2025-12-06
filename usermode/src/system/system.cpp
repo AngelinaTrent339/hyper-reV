@@ -598,6 +598,10 @@ std::uint64_t get_module_base(std::uint64_t cr3, std::uint64_t peb,
   // PEB->Ldr
   const std::uint64_t ldr =
       read_virtual_memory_with_cr3<std::uint64_t>(peb + 0x18, cr3);
+
+  std::println("DEBUG: get_module_base PEB: 0x{:X}, Ldr: 0x{:X}, CR3: 0x{:X}",
+               peb, ldr, cr3);
+
   if (ldr == 0)
     return 0;
 
@@ -606,6 +610,7 @@ std::uint64_t get_module_base(std::uint64_t cr3, std::uint64_t peb,
   std::uint64_t current_entry =
       read_virtual_memory_with_cr3<std::uint64_t>(list_head, cr3);
 
+  int limit = 10;
   while (current_entry != list_head) {
     // LDR_DATA_TABLE_ENTRY
     // InLoadOrderLinks: 0x0
@@ -625,7 +630,14 @@ std::uint64_t get_module_base(std::uint64_t cr3, std::uint64_t peb,
     std::wstring base_dll_name =
         read_unicode_string_with_cr3(entry_base + 0x58, cr3);
 
-    if (user::to_string(base_dll_name) == module_name) {
+    std::string name_str = user::to_string(base_dll_name);
+
+    if (limit > 0) {
+      std::println("DEBUG: Module: '{}' Base: 0x{:X}", name_str, dll_base);
+      limit--;
+    }
+
+    if (_stricmp(name_str.c_str(), module_name.data()) == 0) {
       return dll_base;
     }
 
