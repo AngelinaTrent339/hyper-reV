@@ -331,8 +331,8 @@ std::optional<ntoskrnl_information_t> load_ntoskrnl_information() {
         current_module.full_path_name + current_module.offset_to_file_name);
 
     if (current_module_name == "ntoskrnl.exe") {
-      std::vector<std::uint8_t> ntoskrnl_dump =
-          dump_kernel_module(current_module.image_base);
+      std::vector<std::uint8_t> ntoskrnl_dump = dump_kernel_module(
+          reinterpret_cast<std::uint64_t>(current_module.image_base));
 
       if (ntoskrnl_dump.empty() == true) {
         std::println("unable to dump ntoskrnl.exe");
@@ -746,7 +746,7 @@ std::uint64_t find_code_padding(std::uint64_t cr3, std::uint64_t module_base,
 
       for (std::uint64_t addr = current_addr; addr < end_addr;
            addr += chunk_size) {
-        std::uint64_t read_size = std::min(chunk_size, end_addr - addr);
+        std::uint64_t read_size = (std::min)(chunk_size, end_addr - addr);
         hypercall::read_guest_virtual_memory(buffer.data(), addr, cr3,
                                              read_size);
 
