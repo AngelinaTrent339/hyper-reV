@@ -401,6 +401,17 @@ void process_auh(CLI::App *auh) {
   auto process_info_opt = sys::get_process_by_name(process_name);
 
   if (process_info_opt.has_value() == false) {
+    std::println("process '{}' not found", process_name);
+
+    return;
+  }
+
+  const sys::process_info_t proc = process_info_opt.value();
+
+  std::uint64_t target_va = 0;
+  std::uint64_t module_base = 0;
+
+  if (target.find('!') != std::string::npos) {
     std::string mod = target.substr(0, target.find('!'));
     std::string func = target.substr(target.find('!') + 1);
 

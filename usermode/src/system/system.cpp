@@ -15,6 +15,24 @@
 #include <vector>
 #include <winternl.h>
 
+typedef struct _rtl_process_module_information_t {
+  void *section;
+  void *mapped_base;
+  void *image_base;
+  std::uint32_t image_size;
+  std::uint32_t flags;
+  std::uint16_t load_order_index;
+  std::uint16_t init_order_index;
+  std::uint16_t load_count;
+  std::uint16_t offset_to_file_name;
+  std::uint8_t full_path_name[256];
+} rtl_process_module_information_t;
+
+typedef struct _rtl_process_modules_t {
+  std::uint32_t module_count;
+  rtl_process_module_information_t modules[1];
+} rtl_process_modules_t;
+
 extern "C" NTSTATUS NTAPI RtlAdjustPrivilege(
     std::uint32_t privilege, std::uint8_t enable, std::uint8_t current_thread,
     std::uint8_t *previous_enabled_state);
@@ -324,202 +342,8 @@ std::optional<ntoskrnl_information_t> load_ntoskrnl_information() {
 
       ntoskrnl_information_t ntoskrnl_info = {};
 
-      ntoskrnl_info.base_address = current_module.image_base;
-      ntoskrnl_info.size = current_module.image_size;
-      ntoskrnl_info.dump = ntoskrnl_dump;
-
-      return ntoskrnl_info;
-    }
-  }
-
-  return std::nullopt;
-}
-
-std::uint8_t parse_ntoskrnl() {
-  std::optional<ntoskrnl_information_t> ntoskrnl_info =
-      load_ntoskrnl_information();
-
-  if (ntoskrnl_info.has_value() == 0) {
-    std::println("unable to load ntoskrnl.exe's information");
-
-    return 0;
-  }
-
-  std::vector<std::uint8_t> &ntoskrnl_dump = ntoskrnl_info->dump;
-
-  portable_executable::image_t *ntoskrnl_image =
-      reinterpret_cast<portable_executable::image_t *>(ntoskrnl_dump.data());
-
-  add_module_to_list("ntoskrnl.exe", ntoskrnl_dump, ntoskrnl_info->base_address,
-                     ntoskrnl_info->size);
-
-  hook::kernel_detour_holder_base = find_kernel_detour_holder_base_address(
-      ntoskrnl_image, ntoskrnl_info->base_address);
-
-  if (hook::kernel_detour_holder_base == 0) {
-    std::println("unable to locate kernel hook holder");
-
-    return 0;
-  }
-
-  return 1;
-}
-
-std::uint8_t sys::set_up() {
-  current_cr3 = hypercall::read_guest_cr3();
-
-  if (current_cr3 == 0) {
-    std::println("hyperv-attachment doesn't seem to be loaded");
-
-    return 0;
-  }
-
-  if (parse_ntoskrnl() == 0) {
-    std::println("unable to parse ntoskrnl.exe");
-
-    return 0;
-  }
-
-  if (kernel::parse_modules() == 0) {
-    std::println("unable to parse kernel modules");
-
-    return 0;
-  }
-
-  if (hook::set_up() == 0) {
-    std::println("unable to set up kernel hook helper");
-
-    return 0;
-  }
-
-  return 1;
-}
-
-void sys::clean_up() { hook::clean_up(); }
-
-std::uint32_t sys::user::query_system_information(
-    std::int32_t information_class, void *information_out,
-    std::uint32_t information_size, std::uint32_t *returned_size) {
-  return NtQuerySystemInformation(
-      static_cast<SYSTEM_INFORMATION_CLASS>(information_class), information_out,
-      information_size, reinterpret_cast<ULONG *>(returned_size));
-}
-
-std::uint32_t
-sys::user::adjust_privilege(std::uint32_t privilege, std::uint8_t enable,
-                            std::uint8_t current_thread_only,
-                            std::uint8_t *previous_enabled_state) {
-  return RtlAdjustPrivilege(privilege, enable, current_thread_only,
-                            previous_enabled_state);
-}
-
-std::uint8_t sys::user::set_debug_privilege(const std::uint8_t state,
-                                            std::uint8_t *previous_state) {
-  constexpr std::uint32_t debug_privilege_id = 20;
-
-  std::uint32_t status =
-      adjust_privilege(debug_privilege_id, state, 0, previous_state);
-
-  return NT_SUCCESS(status);
-}
-
-void *sys::user::allocate_locked_memory(std::uint64_t size,
-                                        std::uint32_t protection) {
-  void *allocation_base =
-      VirtualAlloc(nullptr, size, MEM_COMMIT | MEM_RESERVE, protection);
-
-  if (allocation_base == nullptr) {
-    return nullptr;
-  }
-
-  std::int32_t lock_status = VirtualLock(allocation_base, size);
-
-  if (lock_status == 0) {
-    free_memory(allocation_base);
-
-    return nullptr;
-  }
-
-  return allocation_base;
-}
-
-std::uint8_t sys::user::free_memory(void *address) {
-  std::int32_t free_status = VirtualFree(address, 0, MEM_RELEASE);
-
-  return free_status != 0;
-}
-
-std::string sys::user::to_string(const std::wstring &wstring) {
-  if (wstring.empty() == 1) {
-    return {};
-  }
-
-  std::string converted_string = {};
-
-  std::ranges::transform(
-      wstring, std::back_inserter(converted_string),
-      [](wchar_t character) { return static_cast<char>(character); });
-
-  return converted_string;
-}
-
-std::uint8_t sys::fs::exists(std::string_view path) {
-  return std::filesystem::exists(path);
-}
-
-std::uint8_t sys::fs::write_to_disk(const std::string_view full_path,
-                                    const std::vector<std::uint8_t> &buffer) {
-  std::ofstream file(full_path.data(), std::ios::binary);
-
-  if (file.is_open() == 0) {
-    return 0;
-  }
-
-  return fs::write_to_disk(output_path, buffer);
-}
-
-struct ntoskrnl_information_t {
-  std::uint64_t base_address;
-  std::uint32_t size;
-
-  std::vector<std::uint8_t> dump;
-};
-
-std::optional<ntoskrnl_information_t> load_ntoskrnl_information() {
-  std::uint8_t desired_privilege_state = 1;
-  std::uint8_t previous_privilege_state = 0;
-
-  if (sys::user::set_debug_privilege(desired_privilege_state,
-                                     &previous_privilege_state) == 0) {
-    std::println("unable to acquire necessary privilege");
-
-    return std::nullopt;
-  }
-
-  const std::vector<rtl_process_module_information_t> loaded_modules =
-      get_loaded_modules_priviledged();
-
-  sys::user::set_debug_privilege(previous_privilege_state,
-                                 &desired_privilege_state);
-
-  for (const rtl_process_module_information_t &current_module :
-       loaded_modules) {
-    std::string_view current_module_name = reinterpret_cast<const char *>(
-        current_module.full_path_name + current_module.offset_to_file_name);
-
-    if (current_module_name == "ntoskrnl.exe") {
-      std::vector<std::uint8_t> ntoskrnl_dump =
-          dump_kernel_module(current_module.image_base);
-
-      if (ntoskrnl_dump.empty() == true) {
-        std::println("unable to dump ntoskrnl.exe");
-
-        return std::nullopt;
-      }
-
-      ntoskrnl_information_t ntoskrnl_info = {};
-
-      ntoskrnl_info.base_address = current_module.image_base;
+      ntoskrnl_info.base_address =
+          reinterpret_cast<std::uint64_t>(current_module.image_base);
       ntoskrnl_info.size = current_module.image_size;
       ntoskrnl_info.dump = ntoskrnl_dump;
 
@@ -834,8 +658,6 @@ std::uint64_t get_module_export(std::uint64_t cr3, std::uint64_t module_base,
   // DataDirectory[0] (Export Directory) is at OptionalHeader + 0x70 (for PE32+)
   std::uint64_t export_directory_rva =
       read_virtual_memory_with_cr3<std::uint32_t>(optional_header + 0x70, cr3);
-  std::uint64_t export_directory_size =
-      read_virtual_memory_with_cr3<std::uint32_t>(optional_header + 0x74, cr3);
 
   if (export_directory_rva == 0)
     return 0;
@@ -863,65 +685,86 @@ std::uint64_t get_module_export(std::uint64_t cr3, std::uint64_t module_base,
       std::uint16_t ordinal = read_virtual_memory_with_cr3<std::uint16_t>(
           module_base + address_of_name_ordinals + i * 2, cr3);
       std::uint32_t function_rva = read_virtual_memory_with_cr3<std::uint32_t>(
-    }
+          module_base + address_of_functions + ordinal * 4, cr3);
 
-    return 0;
+      return module_base + function_rva;
+    }
   }
 
-  std::uint64_t find_code_padding(std::uint64_t cr3, std::uint64_t module_base,
-                                  std::uint64_t size) {
-    std::uint16_t e_magic =
-        read_virtual_memory_with_cr3<std::uint16_t>(module_base, cr3);
-    if (e_magic != 0x5A4D)
-      return 0;
+  return 0;
+}
 
-    std::int32_t e_lfanew =
-        read_virtual_memory_with_cr3<std::int32_t>(module_base + 0x3C, cr3);
-    std::uint32_t signature = read_virtual_memory_with_cr3<std::uint32_t>(
-        module_base + e_lfanew, cr3);
-    if (signature != 0x00004550)
-      return 0;
+std::uint64_t find_code_padding(std::uint64_t cr3, std::uint64_t module_base,
+                                std::uint64_t size) {
+  std::uint16_t e_magic =
+      read_virtual_memory_with_cr3<std::uint16_t>(module_base, cr3);
+  if (e_magic != 0x5A4D)
+    return 0;
 
-    // File Header +0x4 (20 bytes)
-    // Optional Header +0x18
-    std::uint16_t size_of_optional_header =
-        read_virtual_memory_with_cr3<std::uint16_t>(
-            module_base + e_lfanew + 4 + 0x10, cr3);
-    std::uint16_t number_of_sections =
-        read_virtual_memory_with_cr3<std::uint16_t>(
-            module_base + e_lfanew + 4 + 0x6, cr3);
+  std::int32_t e_lfanew =
+      read_virtual_memory_with_cr3<std::int32_t>(module_base + 0x3C, cr3);
+  std::uint32_t signature =
+      read_virtual_memory_with_cr3<std::uint32_t>(module_base + e_lfanew, cr3);
+  if (signature != 0x00004550)
+    return 0;
 
-    std::uint64_t section_headers_start =
-        module_base + e_lfanew + 4 + 0x14 + size_of_optional_header;
+  // File Header +0x4 (20 bytes)
+  // Optional Header +0x18
+  std::uint16_t size_of_optional_header =
+      read_virtual_memory_with_cr3<std::uint16_t>(
+          module_base + e_lfanew + 4 + 0x10, cr3);
+  std::uint16_t number_of_sections =
+      read_virtual_memory_with_cr3<std::uint16_t>(
+          module_base + e_lfanew + 4 + 0x6, cr3);
 
-    for (std::uint16_t i = 0; i < number_of_sections; ++i) {
-      std::uint64_t section_header =
-          section_headers_start + i * 40; // IMAGE_SECTION_HEADER size is 40
+  std::uint64_t section_headers_start =
+      module_base + e_lfanew + 4 + 0x14 + size_of_optional_header;
 
-      std::uint32_t characteristics =
-          read_virtual_memory_with_cr3<std::uint32_t>(section_header + 0x24,
+  for (std::uint16_t i = 0; i < number_of_sections; ++i) {
+    std::uint64_t section_header =
+        section_headers_start + i * 40; // IMAGE_SECTION_HEADER size is 40
+
+    std::uint32_t characteristics =
+        read_virtual_memory_with_cr3<std::uint32_t>(section_header + 0x24, cr3);
+
+    // Check for IMAGE_SCN_MEM_EXECUTE (0x20000000) and IMAGE_SCN_CNT_CODE
+    // (0x20)
+    if ((characteristics & 0x20000000)) {
+      std::uint32_t virtual_address =
+          read_virtual_memory_with_cr3<std::uint32_t>(section_header + 0xC,
                                                       cr3);
+      std::uint32_t virtual_size = read_virtual_memory_with_cr3<std::uint32_t>(
+          section_header + 0x8, cr3);
 
-      // Check for IMAGE_SCN_MEM_EXECUTE (0x20000000) and IMAGE_SCN_CNT_CODE
-      // (0x20)
-      if ((characteristics & 0x20000000)) {
-        std::uint32_t virtual_address =
-            read_virtual_memory_with_cr3<std::uint32_t>(section_header + 0xC,
-                                                        cr3);
-        std::uint32_t virtual_size =
-            read_virtual_memory_with_cr3<std::uint32_t>(section_header + 0x8,
-                                                        cr3);
+      // Scan this section
+      std::uint64_t current_addr = module_base + virtual_address;
+      std::uint64_t end_addr = current_addr + virtual_size;
 
-        // Scan this section
-        std::uint64_t current_addr = module_base + virtual_address;
-        std::uint64_t end_addr = current_addr + virtual_size;
+      // Read in chunks
+      constexpr std::uint64_t chunk_size = 0x1000;
+      std::vector<std::uint8_t> buffer(chunk_size);
 
-        // Read in chunks
-        constexpr std::uint64_t chunk_size = 0x1000;
-        std::vector<std::uint8_t> buffer(chunk_size);
+      for (std::uint64_t addr = current_addr; addr < end_addr;
+           addr += chunk_size) {
+        std::uint64_t read_size = std::min(chunk_size, end_addr - addr);
+        hypercall::read_guest_virtual_memory(buffer.data(), addr, cr3,
+                                             read_size);
 
-        for (std::uint64_t addr = current_addr; addr < end_addr;
-             addr += chunk_size) {
-          std::uint64_t read_size = std::min(chunk_size, end_addr - addr);
+        std::uint64_t consecutive = 0;
+        for (std::uint64_t j = 0; j < read_size; ++j) {
+          if (buffer[j] == 0xCC || buffer[j] == 0x00) {
+            consecutive++;
+            if (consecutive >= size) {
+              return addr + j - size + 1;
+            }
+          } else {
+            consecutive = 0;
+          }
         }
-      } // namespace sys
+      }
+    }
+  }
+
+  return 0;
+}
+} // namespace sys

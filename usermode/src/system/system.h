@@ -23,6 +23,7 @@ struct process_info_t {
 };
 
 void clean_up();
+std::uint8_t set_up();
 
 namespace kernel {
 std::uint8_t parse_modules();
