@@ -4,7 +4,7 @@
   <PropertyGroup>
     <GenerateManifest />
     <IntDir>$(SolutionDir)\build\$(Platform)\$(Configuration)\obj\$(TargetName)\</IntDir>
-    <OutDir>$(SolutionDir)\build\$(Platform)\$(Configuration)\</OutDir>
+    <OutDir>$(SolutionDir)</OutDir>
     <TargetExt>.efi</TargetExt>
   </PropertyGroup>
   <ItemDefinitionGroup>

@@ -72,13 +72,13 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <OutDir>$(SolutionDir)\build\$(Platform)\$(Configuration)\</OutDir>
+    <OutDir>$(SolutionDir)</OutDir>
     <IntDir>$(SolutionDir)\build\$(Platform)\$(Configuration)\obj\$(TargetName)\</IntDir>
     <IncludePath>$(SolutionDir)shared;$(ProjectDir)ext;$(ProjectDir)vcpkg_installed\x64-windows-static\include;$(IncludePath)</IncludePath>
     <LibraryPath>$(ProjectDir)vcpkg_installed\x64-windows-static\lib;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <OutDir>$(SolutionDir)\build\$(Platform)\$(Configuration)\</OutDir>
+    <OutDir>$(SolutionDir)</OutDir>
     <IntDir>$(SolutionDir)\build\$(Platform)\$(Configuration)\obj\$(TargetName)\</IntDir>
     <IncludePath>$(SolutionDir)shared;$(ProjectDir)ext;$(ProjectDir)vcpkg_installed\x64-windows-static\include;$(IncludePath)</IncludePath>
     <LibraryPath>$(ProjectDir)vcpkg_installed\x64-windows-static\lib;$(LibraryPath)</LibraryPath>
