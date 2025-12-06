@@ -531,6 +531,15 @@ void process_auh(CLI::App *auh) {
   if (hook::add_user_hook(proc.cr3, target_va, holder_va, asm_bytes,
                           post_original_asm_bytes) == 1) {
     std::println("success in user hook");
+    std::println("[!] CRITICAL: DO NOT CLOSE THIS WINDOW. PRESS ENTER TO "
+                 "UNHOOK AND EXIT.");
+    std::println("    (Closing this tool while hooks are active will crash "
+                 "hooked processes)");
+
+    std::cin.get();
+
+    // Todo: Implement proper unhooking here.
+    // For now, keeping the process alive prevents the crash.
   } else {
     std::println("failed to user hook");
   }
