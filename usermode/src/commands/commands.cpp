@@ -114,10 +114,10 @@ void process_help_cmd(CLI::App *help_cmd) {
 
   std::println("\n{}Hooking Commands:{}", console::color::bold,
                console::color::reset);
-  std::println(
-      "  {}hook{}    / {}akh{}    <addr> --asmbytes  - add kernel hook",
-      console::color::yellow, console::color::reset, console::color::dim,
-      console::color::reset);
+  std::println("  {}hook{}    / {}akh{}    <addr> --asmbytes 0xCC 0x90  - add "
+               "kernel hook",
+               console::color::yellow, console::color::reset,
+               console::color::dim, console::color::reset);
   std::println(
       "  {}unhook{} / {}rkh{}    <addr>             - remove kernel hook",
       console::color::yellow, console::color::reset, console::color::dim,
