@@ -6,7 +6,9 @@
 #include "../slat/hook/hook.h"
 #include "../slat/slat.h"
 
+#include "../breakpoint/breakpoint.h"
 #include "../process/process.h"
+
 
 #include "../arch/arch.h"
 #include "../crt/crt.h"
@@ -14,6 +16,7 @@
 
 #include <hypercall/hypercall_def.h>
 #include <ia32-doc/ia32.hpp>
+#include <structures/breakpoint_info.h>
 #include <structures/process_info.h>
 
 std::uint64_t
@@ -514,6 +517,187 @@ void hypercall::process(const hypercall_info_t hypercall_info,
     }
 
     trap_frame->rax = count;
+    break;
+  }
+
+    // ========================================================================
+    // PHASE 3: INVISIBLE NPT BREAKPOINTS
+    // ========================================================================
+
+  case hypercall_type_t::add_breakpoint: {
+    // rdx = guest physical address
+    // r8 = size
+    // r9 = type (breakpoint_type_t)
+    // Stack [rsp+0x28] = action (breakpoint_action_t)
+    const cr3 guest_cr3 = arch::get_guest_cr3();
+    const cr3 slat_cr3 = slat::hyperv_cr3();
+
+    const std::uint64_t gpa = trap_frame->rdx;
+    const std::uint64_t size = trap_frame->r8;
+    const breakpoint_type_t type =
+        static_cast<breakpoint_type_t>(trap_frame->r9);
+
+    // Read action from stack
+    breakpoint_action_t action = breakpoint_action_t::action_log;
+    std::uint64_t stack_gpa = memory_manager::translate_guest_virtual_address(
+        guest_cr3, slat_cr3, {.address = trap_frame->rsp + 0x28});
+    if (stack_gpa != 0) {
+      std::uint64_t size_left = 0;
+      std::uint8_t *mapped = static_cast<std::uint8_t *>(
+          memory_manager::map_guest_physical(slat_cr3, stack_gpa, &size_left));
+      if (mapped && size_left >= 1)
+        action = static_cast<breakpoint_action_t>(*mapped);
+    }
+
+    trap_frame->rax = breakpoint::add(gpa, size, type, action);
+    break;
+  }
+
+  case hypercall_type_t::remove_breakpoint: {
+    // rdx = guest physical address
+    trap_frame->rax = breakpoint::remove(trap_frame->rdx) ? 1 : 0;
+    break;
+  }
+
+  case hypercall_type_t::add_conditional_breakpoint: {
+    // rdx = guest physical address
+    // r8 = size
+    // r9 = type
+    // Stack args: action, condition_addr, condition_value, condition_mask
+    const cr3 guest_cr3 = arch::get_guest_cr3();
+    const cr3 slat_cr3 = slat::hyperv_cr3();
+
+    const std::uint64_t gpa = trap_frame->rdx;
+    const std::uint64_t size = trap_frame->r8;
+    const breakpoint_type_t type =
+        static_cast<breakpoint_type_t>(trap_frame->r9);
+
+    // Read remaining args from stack
+    breakpoint_action_t action = breakpoint_action_t::action_log;
+    std::uint64_t condition_addr = 0, condition_value = 0, condition_mask = 0;
+
+    // action at rsp+0x28
+    std::uint64_t arg_gpa = memory_manager::translate_guest_virtual_address(
+        guest_cr3, slat_cr3, {.address = trap_frame->rsp + 0x28});
+    if (arg_gpa != 0) {
+      std::uint64_t size_left = 0;
+      std::uint8_t *mapped = static_cast<std::uint8_t *>(
+          memory_manager::map_guest_physical(slat_cr3, arg_gpa, &size_left));
+      if (mapped)
+        action = static_cast<breakpoint_action_t>(*mapped);
+    }
+
+    // condition_addr at rsp+0x30
+    arg_gpa = memory_manager::translate_guest_virtual_address(
+        guest_cr3, slat_cr3, {.address = trap_frame->rsp + 0x30});
+    if (arg_gpa != 0) {
+      std::uint64_t size_left = 0;
+      std::uint64_t *mapped = static_cast<std::uint64_t *>(
+          memory_manager::map_guest_physical(slat_cr3, arg_gpa, &size_left));
+      if (mapped && size_left >= 8)
+        condition_addr = *mapped;
+    }
+
+    // condition_value at rsp+0x38
+    arg_gpa = memory_manager::translate_guest_virtual_address(
+        guest_cr3, slat_cr3, {.address = trap_frame->rsp + 0x38});
+    if (arg_gpa != 0) {
+      std::uint64_t size_left = 0;
+      std::uint64_t *mapped = static_cast<std::uint64_t *>(
+          memory_manager::map_guest_physical(slat_cr3, arg_gpa, &size_left));
+      if (mapped && size_left >= 8)
+        condition_value = *mapped;
+    }
+
+    // condition_mask at rsp+0x40
+    arg_gpa = memory_manager::translate_guest_virtual_address(
+        guest_cr3, slat_cr3, {.address = trap_frame->rsp + 0x40});
+    if (arg_gpa != 0) {
+      std::uint64_t size_left = 0;
+      std::uint64_t *mapped = static_cast<std::uint64_t *>(
+          memory_manager::map_guest_physical(slat_cr3, arg_gpa, &size_left));
+      if (mapped && size_left >= 8)
+        condition_mask = *mapped;
+    }
+
+    trap_frame->rax =
+        breakpoint::add_conditional(gpa, size, type, action, condition_addr,
+                                    condition_value, condition_mask);
+    break;
+  }
+
+  case hypercall_type_t::list_breakpoints: {
+    // rdx = pointer to breakpoint_def_t array
+    // r8 = max count
+    const cr3 guest_cr3 = arch::get_guest_cr3();
+    const cr3 slat_cr3 = slat::hyperv_cr3();
+
+    const std::uint64_t buffer_va = trap_frame->rdx;
+    const std::uint64_t max_count = trap_frame->r8;
+
+    std::uint64_t copied = 0;
+    for (std::uint64_t i = 0;
+         i < breakpoint::max_breakpoints && copied < max_count; i++) {
+      breakpoint_def_t *bp = breakpoint::get(i);
+      if (bp && bp->enabled) {
+        std::uint64_t dest_gpa =
+            memory_manager::translate_guest_virtual_address(
+                guest_cr3, slat_cr3,
+                {.address = buffer_va + copied * sizeof(breakpoint_def_t)});
+        if (dest_gpa == 0)
+          break;
+
+        std::uint64_t size_left = 0;
+        void *dest =
+            memory_manager::map_guest_physical(slat_cr3, dest_gpa, &size_left);
+        if (!dest || size_left < sizeof(breakpoint_def_t))
+          break;
+
+        crt::copy_memory(dest, bp, sizeof(breakpoint_def_t));
+        copied++;
+      }
+    }
+    trap_frame->rax = copied;
+    break;
+  }
+
+  case hypercall_type_t::get_breakpoint_hits: {
+    // rdx = pointer to breakpoint_hit_t array
+    // r8 = max count
+    const cr3 guest_cr3 = arch::get_guest_cr3();
+    const cr3 slat_cr3 = slat::hyperv_cr3();
+
+    const std::uint64_t buffer_va = trap_frame->rdx;
+    const std::uint64_t max_count = trap_frame->r8;
+
+    // Get hits into temp buffer
+    breakpoint_hit_t temp_hits[256] = {};
+    std::uint64_t actual_max = (max_count < 256) ? max_count : 256;
+    std::uint64_t hit_count = breakpoint::get_hits(temp_hits, actual_max);
+
+    // Copy to guest
+    for (std::uint64_t i = 0; i < hit_count; i++) {
+      std::uint64_t dest_gpa = memory_manager::translate_guest_virtual_address(
+          guest_cr3, slat_cr3,
+          {.address = buffer_va + i * sizeof(breakpoint_hit_t)});
+      if (dest_gpa == 0)
+        break;
+
+      std::uint64_t size_left = 0;
+      void *dest =
+          memory_manager::map_guest_physical(slat_cr3, dest_gpa, &size_left);
+      if (!dest || size_left < sizeof(breakpoint_hit_t))
+        break;
+
+      crt::copy_memory(dest, &temp_hits[i], sizeof(breakpoint_hit_t));
+    }
+    trap_frame->rax = hit_count;
+    break;
+  }
+
+  case hypercall_type_t::clear_breakpoint_hits: {
+    breakpoint::clear_hits();
+    trap_frame->rax = 1;
     break;
   }
 
