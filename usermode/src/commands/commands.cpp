@@ -5,11 +5,10 @@
 #include <CLI/CLI.hpp>
 #include <hypercall/hypercall_def.h>
 
+
 #include <array>
 #include <print>
 
-#define NOMINMAX
-#include <Windows.h>
 
 #define d_invoke_command_processor(command) process_##command(##command)
 #define d_initial_process_command(command)                                     \
@@ -377,174 +376,6 @@ void process_rkh(CLI::App *rkh) {
   }
 }
 
-CLI::App *init_auh(CLI::App &app) {
-  CLI::App *auh = app.add_subcommand("auh", "add a hook on user process code")
-                      ->ignore_case();
-
-  add_command_option(auh, "process_name")->required();
-  add_command_option(auh, "target")->required();
-
-  add_command_option(auh, "--holder");
-  add_command_option(auh, "--asmbytes")
-      ->multi_option_policy(CLI::MultiOptionPolicy::TakeAll)
-      ->expected(-1);
-  add_command_option(auh, "--post_original_asmbytes")
-      ->multi_option_policy(CLI::MultiOptionPolicy::TakeAll)
-      ->expected(-1);
-  add_command_flag(auh, "--monitor");
-
-  return auh;
-}
-
-void process_auh(CLI::App *auh) {
-  const std::string process_name =
-      get_command_option<std::string>(auh, "process_name");
-  const std::string target = get_command_option<std::string>(auh, "target");
-
-  auto process_info_opt = sys::get_process_by_name(process_name);
-
-  if (process_info_opt.has_value() == false) {
-    std::println("process '{}' not found", process_name);
-
-    return;
-  }
-
-  const sys::process_info_t proc = process_info_opt.value();
-
-  std::uint64_t target_va = 0;
-  std::uint64_t module_base = 0;
-
-  if (target.find('!') != std::string::npos) {
-    std::string mod = target.substr(0, target.find('!'));
-    std::string func = target.substr(target.find('!') + 1);
-
-    module_base = sys::get_module_base(proc.cr3, proc.peb, mod);
-
-    if (module_base == 0) {
-      std::println("module '{}' not found in process", mod);
-
-      return;
-    }
-
-    target_va = sys::get_module_export(proc.cr3, module_base, func);
-  } else {
-    try {
-      target_va = std::stoull(target, nullptr, 16);
-    } catch (...) {
-    }
-  }
-
-  if (target_va == 0) {
-    std::println("unable to resolve target address");
-
-    return;
-  }
-
-  std::string holder = get_command_option<std::string>(auh, "--holder");
-  std::uint64_t holder_va = 0;
-
-  if (holder.empty() == false) {
-    if (holder.find('!') != std::string::npos) {
-      std::string mod = holder.substr(0, holder.find('!'));
-      std::string func = holder.substr(holder.find('!') + 1);
-
-      std::uint64_t base = sys::get_module_base(proc.cr3, proc.peb, mod);
-
-      if (base != 0) {
-        holder_va = sys::get_module_export(proc.cr3, base, func);
-      }
-    } else {
-      try {
-        holder_va = std::stoull(holder, nullptr, 16);
-      } catch (...) {
-      }
-    }
-  } else {
-    if (module_base != 0) {
-      holder_va = sys::find_code_padding(proc.cr3, module_base, 0x100);
-      if (holder_va != 0)
-        std::println("found padding at 0x{:X}", holder_va);
-    } else {
-      std::println("module unknown, cannot find padding automatically. provide "
-                   "--holder");
-      return;
-    }
-  }
-
-  if (holder_va == 0) {
-    std::println("unable to resolve holder address");
-    return;
-  }
-
-  std::vector<uint8_t> asm_bytes =
-      get_command_option<std::vector<uint8_t>>(auh, "--asmbytes");
-
-  // Force pages to be resident
-  HANDLE hProcess =
-      OpenProcess(PROCESS_VM_READ, FALSE, static_cast<DWORD>(proc.id));
-  if (hProcess) {
-    char buffer;
-    SIZE_T bytesRead;
-    bool target_touched = ReadProcessMemory(
-        hProcess, reinterpret_cast<LPCVOID>(target_va), &buffer, 1, &bytesRead);
-    bool holder_touched = ReadProcessMemory(
-        hProcess, reinterpret_cast<LPCVOID>(holder_va), &buffer, 1, &bytesRead);
-
-    if (!target_touched)
-      std::println("Warning: Failed to touch target VA (Error: {})",
-                   GetLastError());
-    if (!holder_touched)
-      std::println("Warning: Failed to touch holder VA (Error: {})",
-                   GetLastError());
-
-    CloseHandle(hProcess);
-  } else {
-    std::println(
-        "Warning: Failed to open process (ID: {}) to touch memory. Error: {}",
-        proc.id, GetLastError());
-  }
-  const std::vector<uint8_t> post_original_asm_bytes =
-      get_command_option<std::vector<uint8_t>>(auh, "--post_original_asmbytes");
-  const std::uint8_t monitor = get_command_flag(auh, "--monitor");
-
-  if (monitor == 1) {
-    std::array<std::uint8_t, 9> monitor_bytes = {
-        0x51,                         // push rcx
-        0xB9, 0x00, 0x00, 0x00, 0x00, // mov ecx, 0
-        0x0F, 0xA2,                   // cpuid
-        0x59                          // pop rcx
-    };
-
-    hypercall_info_t call_info = {};
-
-    call_info.primary_key = hypercall_primary_key;
-    call_info.secondary_key = hypercall_secondary_key;
-    call_info.call_type = hypercall_type_t::log_current_state;
-
-    *reinterpret_cast<std::uint32_t *>(&monitor_bytes[2]) =
-        static_cast<std::uint32_t>(call_info.value);
-
-    asm_bytes.insert(asm_bytes.end(), monitor_bytes.begin(),
-                     monitor_bytes.end());
-  }
-
-  if (hook::add_user_hook(proc.cr3, target_va, holder_va, asm_bytes,
-                          post_original_asm_bytes) == 1) {
-    std::println("success in user hook");
-    std::println("[!] CRITICAL: DO NOT CLOSE THIS WINDOW. PRESS ENTER TO "
-                 "UNHOOK AND EXIT.");
-    std::println("    (Closing this tool while hooks are active will crash "
-                 "hooked processes)");
-
-    std::cin.get();
-
-    // Todo: Implement proper unhooking here.
-    // For now, keeping the process alive prevents the crash.
-  } else {
-    std::println("failed to user hook");
-  }
-}
-
 CLI::App *init_hgpp(CLI::App &app, CLI::Transformer &aliases_transformer) {
   CLI::App *hgpp =
       app.add_subcommand("hgpp",
@@ -647,31 +478,6 @@ void process_lkm(CLI::App *lkm) {
   for (const auto &[module_name, module_info] : sys::kernel::modules_list) {
     std::println("'{}' has a base address of: 0x{:x}, and a size of: 0x{:X}",
                  module_name, module_info.base_address, module_info.size);
-  }
-}
-
-CLI::App *init_gpc(CLI::App &app) {
-  CLI::App *gpc =
-      app.add_subcommand("gpc", "get process information (cr3, peb) by name")
-          ->ignore_case();
-
-  add_command_option(gpc, "name")->required();
-
-  return gpc;
-}
-
-void process_gpc(CLI::App *gpc) {
-  const std::string name = get_command_option<std::string>(gpc, "name");
-  auto info_opt = sys::get_process_by_name(name);
-
-  if (info_opt.has_value()) {
-    const auto &info = info_opt.value();
-    std::println("Process: {}", info.name);
-    std::println("ID: {}", info.id);
-    std::println("CR3: 0x{:X}", info.cr3);
-    std::println("PEB: 0x{:X}", info.peb);
-  } else {
-    std::println("Process '{}' not found", name);
   }
 }
 
@@ -794,13 +600,11 @@ void commands::process(const std::string command) {
   CLI::App *cgvm = init_cgvm(app, aliases_transformer);
   CLI::App *akh = init_akh(app, aliases_transformer);
   CLI::App *rkh = init_rkh(app, aliases_transformer);
-  CLI::App *auh = init_auh(app);
   CLI::App *gva = init_gva(app, aliases_transformer);
   CLI::App *hgpp = init_hgpp(app, aliases_transformer);
   CLI::App *fl = init_fl(app);
   CLI::App *hfpc = init_hfpc(app);
   CLI::App *lkm = init_lkm(app);
-  CLI::App *gpc = init_gpc(app);
   CLI::App *kme = init_kme(app);
   CLI::App *dkm = init_dkm(app);
 
@@ -816,13 +620,11 @@ void commands::process(const std::string command) {
     d_process_command(cgvm);
     d_process_command(akh);
     d_process_command(rkh);
-    d_process_command(auh);
     d_process_command(gva);
     d_process_command(hgpp);
     d_process_command(fl);
     d_process_command(hfpc);
     d_process_command(lkm);
-    d_process_command(gpc);
     d_process_command(kme);
     d_process_command(dkm);
   } catch (const CLI::ParseError &error) {

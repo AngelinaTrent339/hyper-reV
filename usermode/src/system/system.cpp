@@ -7,6 +7,7 @@
 #include "../hook/hook.h"
 #include "../hypercall/hypercall.h"
 
+
 #include <portable_executable/image.hpp>
 
 #include <Windows.h>
@@ -15,23 +16,6 @@
 #include <vector>
 #include <winternl.h>
 
-typedef struct _rtl_process_module_information_t {
-  void *section;
-  void *mapped_base;
-  void *image_base;
-  std::uint32_t image_size;
-  std::uint32_t flags;
-  std::uint16_t load_order_index;
-  std::uint16_t init_order_index;
-  std::uint16_t load_count;
-  std::uint16_t offset_to_file_name;
-  std::uint8_t full_path_name[256];
-} rtl_process_module_information_t;
-
-typedef struct _rtl_process_modules_t {
-  std::uint32_t module_count;
-  rtl_process_module_information_t modules[1];
-} rtl_process_modules_t;
 
 extern "C" NTSTATUS NTAPI RtlAdjustPrivilege(
     std::uint32_t privilege, std::uint8_t enable, std::uint8_t current_thread,
@@ -331,8 +315,8 @@ std::optional<ntoskrnl_information_t> load_ntoskrnl_information() {
         current_module.full_path_name + current_module.offset_to_file_name);
 
     if (current_module_name == "ntoskrnl.exe") {
-      std::vector<std::uint8_t> ntoskrnl_dump = dump_kernel_module(
-          reinterpret_cast<std::uint64_t>(current_module.image_base));
+      std::vector<std::uint8_t> ntoskrnl_dump =
+          dump_kernel_module(current_module.image_base);
 
       if (ntoskrnl_dump.empty() == true) {
         std::println("unable to dump ntoskrnl.exe");
@@ -342,8 +326,7 @@ std::optional<ntoskrnl_information_t> load_ntoskrnl_information() {
 
       ntoskrnl_information_t ntoskrnl_info = {};
 
-      ntoskrnl_info.base_address =
-          reinterpret_cast<std::uint64_t>(current_module.image_base);
+      ntoskrnl_info.base_address = current_module.image_base;
       ntoskrnl_info.size = current_module.image_size;
       ntoskrnl_info.dump = ntoskrnl_dump;
 
@@ -498,277 +481,3 @@ std::uint8_t sys::fs::write_to_disk(const std::string_view full_path,
 
   return file.good();
 }
-
-template <typename t>
-t read_virtual_memory_with_cr3(std::uint64_t address, std::uint64_t cr3) {
-  t buffer = t();
-  hypercall::read_guest_virtual_memory(&buffer, address, cr3, sizeof(t));
-  return buffer;
-}
-
-std::wstring read_unicode_string_with_cr3(std::uint64_t address,
-                                          std::uint64_t cr3) {
-  std::uint16_t length =
-      read_virtual_memory_with_cr3<std::uint16_t>(address, cr3);
-
-  if (length == 0) {
-    return {};
-  }
-
-  std::uint64_t buffer_address =
-      read_virtual_memory_with_cr3<std::uint64_t>(address + 8, cr3);
-
-  std::wstring string(length / 2, L'\0');
-
-  hypercall::read_guest_virtual_memory(string.data(), buffer_address, cr3,
-                                       length);
-
-  return string;
-}
-
-namespace sys {
-std::optional<process_info_t> get_process_by_name(std::string_view name) {
-  const std::string_view ntoskrnl_name = "ntoskrnl.exe";
-
-  if (kernel::modules_list.contains(ntoskrnl_name.data()) == false) {
-    return std::nullopt;
-  }
-
-  std::string ps_isp_name =
-      std::string(ntoskrnl_name) + "!PsInitialSystemProcess";
-  const std::uint64_t ps_initial_system_process_address =
-      kernel::modules_list[ntoskrnl_name.data()].exports[ps_isp_name];
-
-  if (ps_initial_system_process_address == 0) {
-    return std::nullopt;
-  }
-
-  const std::uint64_t system_process =
-      read_kernel_virtual_memory<std::uint64_t>(
-          ps_initial_system_process_address);
-
-  std::uint64_t current_process = system_process;
-
-  // win 11 24h2 offsets (Germanium)
-  constexpr std::uint64_t eprocess_unique_process_id = 0x1d0;
-  constexpr std::uint64_t eprocess_active_process_links = 0x1d8;
-  constexpr std::uint64_t eprocess_directory_table_base = 0x28;
-  constexpr std::uint64_t eprocess_peb = 0x2e0;
-  constexpr std::uint64_t eprocess_image_file_name = 0x338;
-
-  do {
-    char image_file_name[16] = {};
-
-    hypercall::read_guest_virtual_memory(
-        image_file_name, current_process + eprocess_image_file_name,
-        current_cr3, 15);
-
-    if (name == image_file_name) {
-      process_info_t process_info = {};
-
-      process_info.id = read_virtual_memory_with_cr3<std::uint64_t>(
-          current_process + eprocess_unique_process_id, current_cr3);
-      process_info.cr3 = read_virtual_memory_with_cr3<std::uint64_t>(
-          current_process + eprocess_directory_table_base, current_cr3);
-      process_info.peb = read_virtual_memory_with_cr3<std::uint64_t>(
-          current_process + eprocess_peb, current_cr3);
-      process_info.name = image_file_name;
-
-      return process_info;
-    }
-
-    const std::uint64_t active_process_links =
-        current_process + eprocess_active_process_links;
-    const std::uint64_t next_process_link =
-        read_virtual_memory_with_cr3<std::uint64_t>(active_process_links,
-                                                    current_cr3);
-
-    current_process = next_process_link - eprocess_active_process_links;
-
-  } while (current_process != system_process);
-
-  return std::nullopt;
-}
-
-std::uint64_t get_module_base(std::uint64_t cr3, std::uint64_t peb,
-                              std::string_view module_name) {
-  if (peb == 0)
-    return 0;
-
-  // PEB->Ldr
-  const std::uint64_t ldr =
-      read_virtual_memory_with_cr3<std::uint64_t>(peb + 0x18, cr3);
-
-  if (ldr == 0)
-    return 0;
-
-  // Ldr->InMemoryOrderModuleList
-  const std::uint64_t list_head = ldr + 0x20;
-  std::uint64_t current_entry =
-      read_virtual_memory_with_cr3<std::uint64_t>(list_head, cr3);
-
-  while (current_entry != list_head) {
-    // LDR_DATA_TABLE_ENTRY
-    // InLoadOrderLinks: 0x0
-    // InMemoryOrderLinks: 0x10
-    // InInitializationOrderLinks: 0x20
-    // DllBase: 0x30
-    // EntryPoint: 0x38
-    // SizeOfImage: 0x40
-    // FullDllName: 0x48
-    // BaseDllName: 0x58
-
-    // We are iterating InMemoryOrder, so entry points to +0x10 of the struct.
-    const std::uint64_t entry_base = current_entry - 0x10;
-
-    std::uint64_t dll_base =
-        read_virtual_memory_with_cr3<std::uint64_t>(entry_base + 0x30, cr3);
-    std::wstring base_dll_name =
-        read_unicode_string_with_cr3(entry_base + 0x58, cr3);
-
-    std::string name_str = user::to_string(base_dll_name);
-
-    if (_stricmp(name_str.c_str(), module_name.data()) == 0) {
-      return dll_base;
-    }
-
-    current_entry =
-        read_virtual_memory_with_cr3<std::uint64_t>(current_entry, cr3);
-  }
-
-  return 0;
-}
-
-std::uint64_t get_module_export(std::uint64_t cr3, std::uint64_t module_base,
-                                std::string_view export_name) {
-  // Read DOS header
-  std::uint16_t e_magic =
-      read_virtual_memory_with_cr3<std::uint16_t>(module_base, cr3);
-  if (e_magic != 0x5A4D)
-    return 0;
-
-  std::int32_t e_lfanew =
-      read_virtual_memory_with_cr3<std::int32_t>(module_base + 0x3C, cr3);
-
-  // Read NT Headers signature
-  std::uint32_t signature =
-      read_virtual_memory_with_cr3<std::uint32_t>(module_base + e_lfanew, cr3);
-  if (signature != 0x00004550)
-    return 0;
-
-  // Optional Header is at +0x18 after Signature + FileHeader (0x14)
-  std::uint64_t optional_header = module_base + e_lfanew + 4 + 0x14;
-
-  // DataDirectory[0] (Export Directory) is at OptionalHeader + 0x70 (for PE32+)
-  std::uint64_t export_directory_rva =
-      read_virtual_memory_with_cr3<std::uint32_t>(optional_header + 0x70, cr3);
-
-  if (export_directory_rva == 0)
-    return 0;
-
-  std::uint64_t export_dir_addr = module_base + export_directory_rva;
-
-  std::uint32_t number_of_names =
-      read_virtual_memory_with_cr3<std::uint32_t>(export_dir_addr + 0x18, cr3);
-  std::uint32_t address_of_functions =
-      read_virtual_memory_with_cr3<std::uint32_t>(export_dir_addr + 0x1C, cr3);
-  std::uint32_t address_of_names =
-      read_virtual_memory_with_cr3<std::uint32_t>(export_dir_addr + 0x20, cr3);
-  std::uint32_t address_of_name_ordinals =
-      read_virtual_memory_with_cr3<std::uint32_t>(export_dir_addr + 0x24, cr3);
-
-  for (std::uint32_t i = 0; i < number_of_names; ++i) {
-    std::uint32_t name_rva = read_virtual_memory_with_cr3<std::uint32_t>(
-        module_base + address_of_names + i * 4, cr3);
-
-    char name_buffer[64] = {};
-    hypercall::read_guest_virtual_memory(name_buffer, module_base + name_rva,
-                                         cr3, 64);
-
-    if (export_name == name_buffer) {
-      std::uint16_t ordinal = read_virtual_memory_with_cr3<std::uint16_t>(
-          module_base + address_of_name_ordinals + i * 2, cr3);
-      std::uint32_t function_rva = read_virtual_memory_with_cr3<std::uint32_t>(
-          module_base + address_of_functions + ordinal * 4, cr3);
-
-      return module_base + function_rva;
-    }
-  }
-
-  return 0;
-}
-
-std::uint64_t find_code_padding(std::uint64_t cr3, std::uint64_t module_base,
-                                std::uint64_t size) {
-  std::uint16_t e_magic =
-      read_virtual_memory_with_cr3<std::uint16_t>(module_base, cr3);
-  if (e_magic != 0x5A4D)
-    return 0;
-
-  std::int32_t e_lfanew =
-      read_virtual_memory_with_cr3<std::int32_t>(module_base + 0x3C, cr3);
-  std::uint32_t signature =
-      read_virtual_memory_with_cr3<std::uint32_t>(module_base + e_lfanew, cr3);
-  if (signature != 0x00004550)
-    return 0;
-
-  // File Header +0x4 (20 bytes)
-  // Optional Header +0x18
-  std::uint16_t size_of_optional_header =
-      read_virtual_memory_with_cr3<std::uint16_t>(
-          module_base + e_lfanew + 4 + 0x10, cr3);
-  std::uint16_t number_of_sections =
-      read_virtual_memory_with_cr3<std::uint16_t>(
-          module_base + e_lfanew + 4 + 0x6, cr3);
-
-  std::uint64_t section_headers_start =
-      module_base + e_lfanew + 4 + 0x14 + size_of_optional_header;
-
-  for (std::uint16_t i = 0; i < number_of_sections; ++i) {
-    std::uint64_t section_header =
-        section_headers_start + i * 40; // IMAGE_SECTION_HEADER size is 40
-
-    std::uint32_t characteristics =
-        read_virtual_memory_with_cr3<std::uint32_t>(section_header + 0x24, cr3);
-
-    // Check for IMAGE_SCN_MEM_EXECUTE (0x20000000) and IMAGE_SCN_CNT_CODE
-    // (0x20)
-    if ((characteristics & 0x20000000)) {
-      std::uint32_t virtual_address =
-          read_virtual_memory_with_cr3<std::uint32_t>(section_header + 0xC,
-                                                      cr3);
-      std::uint32_t virtual_size = read_virtual_memory_with_cr3<std::uint32_t>(
-          section_header + 0x8, cr3);
-
-      // Scan this section
-      std::uint64_t current_addr = module_base + virtual_address;
-      std::uint64_t end_addr = current_addr + virtual_size;
-
-      // Read in chunks
-      constexpr std::uint64_t chunk_size = 0x1000;
-      std::vector<std::uint8_t> buffer(chunk_size);
-
-      for (std::uint64_t addr = current_addr; addr < end_addr;
-           addr += chunk_size) {
-        std::uint64_t read_size = (std::min)(chunk_size, end_addr - addr);
-        hypercall::read_guest_virtual_memory(buffer.data(), addr, cr3,
-                                             read_size);
-
-        std::uint64_t consecutive = 0;
-        for (std::uint64_t j = 0; j < read_size; ++j) {
-          if (buffer[j] == 0xCC || buffer[j] == 0x00) {
-            consecutive++;
-            if (consecutive >= size) {
-              return addr + j - size + 1;
-            }
-          } else {
-            consecutive = 0;
-          }
-        }
-      }
-    }
-  }
-
-  return 0;
-}
-} // namespace sys
