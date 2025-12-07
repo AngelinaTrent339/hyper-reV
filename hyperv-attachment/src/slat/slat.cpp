@@ -4,7 +4,6 @@
 #include "../memory_manager/memory_manager.h"
 #include <ia32-doc/ia32.hpp>
 
-
 #include "cr3/cr3.h"
 #include "cr3/pte.h"
 #include "hook/hook.h"
@@ -135,14 +134,14 @@ bool slat::modify_page_permissions(std::uint64_t guest_physical_address,
 #else
   // AMD NPT: Uses regular paging bits
   // present = read (bit 0)
-  // read_write = write (bit 1)
+  // write = write (bit 1)
   // execute_disable = ~execute (bit 63 in full pte)
   if (set) {
     // Add permissions (set bits)
     if (permissions_mask & 1)
       target_pte->present = 1; // R
     if (permissions_mask & 2)
-      target_pte->read_write = 1; // W
+      target_pte->write = 1; // W
     if (permissions_mask & 4)
       target_pte->execute_disable = 0; // X (disable NX)
 
@@ -150,7 +149,7 @@ bool slat::modify_page_permissions(std::uint64_t guest_physical_address,
       if (permissions_mask & 1)
         hook_pte->present = 1;
       if (permissions_mask & 2)
-        hook_pte->read_write = 1;
+        hook_pte->write = 1;
       if (permissions_mask & 4)
         hook_pte->execute_disable = 0;
     }
@@ -162,7 +161,7 @@ bool slat::modify_page_permissions(std::uint64_t guest_physical_address,
     if (permissions_mask & 1)
       target_pte->present = 0; // No read
     if (permissions_mask & 2)
-      target_pte->read_write = 0; // No write
+      target_pte->write = 0; // No write
     if (permissions_mask & 4)
       target_pte->execute_disable = 1; // No execute (set NX)
 
@@ -170,7 +169,7 @@ bool slat::modify_page_permissions(std::uint64_t guest_physical_address,
       if (permissions_mask & 1)
         hook_pte->present = 0;
       if (permissions_mask & 2)
-        hook_pte->read_write = 0;
+        hook_pte->write = 0;
       if (permissions_mask & 4)
         hook_pte->execute_disable = 1;
     }

@@ -997,10 +997,11 @@ void hypercall::process(const hypercall_info_t hypercall_info,
     if (enable) {
       // Use existing slat code hook mechanism
       // This redirects reads to shadow page
-      trap_frame->rax = hook::add_entry(gpa, shadow_va) ? 1 : 0;
+      trap_frame->rax =
+          slat::hook::add({.address = gpa}, {.address = shadow_va}) ? 1 : 0;
     } else {
       // Remove the hook to restore normal access
-      trap_frame->rax = hook::remove_entry(gpa) ? 1 : 0;
+      trap_frame->rax = slat::hook::remove({.address = gpa}) ? 1 : 0;
     }
     break;
   }

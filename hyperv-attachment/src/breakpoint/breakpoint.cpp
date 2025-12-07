@@ -5,8 +5,7 @@
 #include "../slat/cr3/cr3.h"
 #include "../slat/slat.h"
 
-
-namespace breakpoint {
+namespace npt_breakpoint {
 // ========================================================================
 // GLOBAL STATE
 // ========================================================================
@@ -315,4 +314,4 @@ void setup_single_step(std::uint64_t cpu_index, std::uint64_t bp_index) {
   // The caller should now set TF in RFLAGS to enable single-step
   // (handled in arch-specific code)
 }
-} // namespace breakpoint
+} // namespace npt_breakpoint

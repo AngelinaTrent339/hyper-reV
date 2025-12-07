@@ -2,7 +2,7 @@
 #include <cstdint>
 #include <structures/breakpoint_info.h>
 
-namespace breakpoint {
+namespace npt_breakpoint {
 // ========================================================================
 // NPT-BASED INVISIBLE BREAKPOINTS
 //
@@ -115,4 +115,4 @@ void on_single_step_complete(std::uint64_t cpu_index);
 // Set up single-step to execute one instruction then re-enable BP
 void setup_single_step(std::uint64_t cpu_index, std::uint64_t bp_index);
 
-} // namespace breakpoint
+} // namespace npt_breakpoint

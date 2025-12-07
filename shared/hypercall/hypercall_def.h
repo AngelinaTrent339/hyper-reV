@@ -43,21 +43,28 @@ enum class hypercall_type_t : std::uint64_t {
   search_memory_pattern, // AOB scan
   dump_memory_region,    // Dump bypassing AC
   set_windows_offsets,   // Set kernel structure offsets
+  dump_module,           // Dump module
 
-  // === PHASE 6: MEMORY CLOAKING (31-33) ===
+  // === PHASE 6: MEMORY CLOAKING (31-34) ===
   cloak_memory_region,   // Hide from guest reads
   uncloak_memory_region, // Restore normal access
   list_cloaked_regions,  // Get cloaked regions
+  cloak_memory,          // Simplified cloak API
 
-  // === PHASE 7: INSTRUCTION TRACING (34-36) ===
+  // === PHASE 7: INSTRUCTION TRACING (35-38) ===
   start_instruction_trace, // TF-based single step
   stop_instruction_trace,  // Stop tracing
   get_instruction_trace,   // Get trace log
+  clear_instruction_trace, // Clear trace log
 
-  // === PHASE 8: CODE EXECUTION (37-39) ===
+  // === PHASE 8: CODE EXECUTION (39-44) ===
   execute_shellcode,      // Run shellcode in guest
   call_guest_function,    // Call function with args
   allocate_hidden_memory, // Allocate hidden executable memory
+  write_shellcode,        // Write shellcode to guest
+  execute_in_guest,       // Execute at address
+  find_code_cave,         // Find code cave
+  get_execution_result,   // Get execution result
 };
 
 #pragma warning(push)
