@@ -38,6 +38,9 @@ struct breakpoint_def_t {
   std::uint64_t condition_address; // Address to check
   std::uint64_t condition_value;   // Expected value
   std::uint64_t condition_mask;    // Comparison mask
+
+  // Statistics
+  std::uint64_t hit_count; // Number of times BP was hit
 };
 
 // Breakpoint hit log entry

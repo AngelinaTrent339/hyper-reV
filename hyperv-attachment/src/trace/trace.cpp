@@ -1,6 +1,7 @@
 #include "trace.h"
 #include "../crt/crt.h"
 #include "../memory/memory.h"
+#include <intrin.h>
 
 namespace instruction_trace {
 // ========================================================================

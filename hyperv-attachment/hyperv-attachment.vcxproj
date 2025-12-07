@@ -170,13 +170,17 @@
   <ItemGroup>
     <ClCompile Include="src\apic\apic.cpp" />
     <ClCompile Include="src\arch\arch.cpp" />
+    <ClCompile Include="src\breakpoint\breakpoint.cpp" />
     <ClCompile Include="src\crt\crt.cpp" />
+    <ClCompile Include="src\execute\execute.cpp" />
     <ClCompile Include="src\hypercall\hypercall.cpp" />
     <ClCompile Include="src\interrupts\interrupts.cpp" />
     <ClCompile Include="src\logs\logs.cpp" />
     <ClCompile Include="src\main.cpp" />
+    <ClCompile Include="src\memory\memory.cpp" />
     <ClCompile Include="src\memory_manager\heap_manager.cpp" />
     <ClCompile Include="src\memory_manager\memory_manager.cpp" />
+    <ClCompile Include="src\process\process.cpp" />
     <ClCompile Include="src\slat\hook\amd_page_split.cpp" />
     <ClCompile Include="src\slat\hook\hook.cpp" />
     <ClCompile Include="src\slat\hook\hook_entry.cpp" />
@@ -185,6 +189,8 @@
     <ClCompile Include="src\slat\cr3\deep_copy.cpp" />
     <ClCompile Include="src\slat\cr3\pte.cpp" />
     <ClCompile Include="src\slat\violation\violation.cpp" />
+    <ClCompile Include="src\syscall\syscall.cpp" />
+    <ClCompile Include="src\trace\trace.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\apic\apic.h" />

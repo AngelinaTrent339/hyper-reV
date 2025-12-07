@@ -5,12 +5,29 @@
 #include "../slat/cr3/cr3.h"
 #include "../slat/slat.h"
 
-
 namespace memory_analysis {
 // ========================================================================
 // VAD ENUMERATION
 // Walk the VAD AVL tree to enumerate all memory regions
 // ========================================================================
+
+// Helper to read guest virtual memory
+static bool read_guest_virt(std::uint64_t target_cr3, std::uint64_t va,
+                            void *buffer, std::uint64_t size) {
+  const cr3 slat_cr3 = slat::hyperv_cr3();
+  std::uint64_t gpa = memory_manager::translate_guest_virtual_address(
+      {.flags = target_cr3}, slat_cr3, {.address = va});
+  if (gpa == 0)
+    return false;
+
+  std::uint64_t size_left = 0;
+  void *mapped = memory_manager::map_guest_physical(slat_cr3, gpa, &size_left);
+  if (!mapped || size_left < size)
+    return false;
+
+  crt::copy_memory(buffer, mapped, size);
+  return true;
+}
 
 // Helper to walk VAD tree recursively
 static void walk_vad_tree(std::uint64_t target_cr3, std::uint64_t vad_node,
@@ -19,7 +36,6 @@ static void walk_vad_tree(std::uint64_t target_cr3, std::uint64_t vad_node,
   if (vad_node == 0 || current_index >= max_count)
     return;
 
-  const cr3 slat_cr3 = slat::hyperv_cr3();
   const auto &offsets = process::g_offsets;
 
   // Read VAD node data
@@ -41,23 +57,22 @@ static void walk_vad_tree(std::uint64_t target_cr3, std::uint64_t vad_node,
   std::uint32_t vad_flags = 0;
 
   // Read left/right children
-  process::read_guest_virtual(target_cr3, vad_node + offsets.vad_Left,
-                              &left_child, sizeof(left_child));
-  process::read_guest_virtual(target_cr3, vad_node + offsets.vad_Right,
-                              &right_child, sizeof(right_child));
+  read_guest_virt(target_cr3, vad_node + offsets.vad_Left, &left_child,
+                  sizeof(left_child));
+  read_guest_virt(target_cr3, vad_node + offsets.vad_Right, &right_child,
+                  sizeof(right_child));
 
   // Read VPN info
-  process::read_guest_virtual(target_cr3, vad_node + offsets.vad_StartingVpn,
-                              &starting_vpn, sizeof(starting_vpn));
-  process::read_guest_virtual(target_cr3, vad_node + offsets.vad_EndingVpn,
-                              &ending_vpn, sizeof(ending_vpn));
-  process::read_guest_virtual(target_cr3,
-                              vad_node + offsets.vad_StartingVpnHigh,
-                              &starting_vpn_high, sizeof(starting_vpn_high));
-  process::read_guest_virtual(target_cr3, vad_node + offsets.vad_EndingVpnHigh,
-                              &ending_vpn_high, sizeof(ending_vpn_high));
-  process::read_guest_virtual(target_cr3, vad_node + offsets.vad_VadFlags,
-                              &vad_flags, sizeof(vad_flags));
+  read_guest_virt(target_cr3, vad_node + offsets.vad_StartingVpn, &starting_vpn,
+                  sizeof(starting_vpn));
+  read_guest_virt(target_cr3, vad_node + offsets.vad_EndingVpn, &ending_vpn,
+                  sizeof(ending_vpn));
+  read_guest_virt(target_cr3, vad_node + offsets.vad_StartingVpnHigh,
+                  &starting_vpn_high, sizeof(starting_vpn_high));
+  read_guest_virt(target_cr3, vad_node + offsets.vad_EndingVpnHigh,
+                  &ending_vpn_high, sizeof(ending_vpn_high));
+  read_guest_virt(target_cr3, vad_node + offsets.vad_VadFlags, &vad_flags,
+                  sizeof(vad_flags));
 
   // Calculate full virtual addresses (VPN * 4KB)
   std::uint64_t start_addr =
@@ -71,8 +86,8 @@ static void walk_vad_tree(std::uint64_t target_cr3, std::uint64_t vad_node,
   buffer[current_index].start_address = start_addr;
   buffer[current_index].end_address = end_addr;
   buffer[current_index].protection =
-      (vad_flags >> 3) & 0x1F;                         // VadFlags.Protection
-  buffer[current_index].type = (vad_flags >> 8) & 0x7; // VadFlags.VadType
+      (vad_flags >> 3) & 0x1F; // VadFlags.Protection
+  buffer[current_index].vad_type = (vad_flags >> 8) & 0x7; // VadFlags.VadType
   buffer[current_index].is_private =
       (vad_flags >> 11) & 1; // VadFlags.PrivateMemory
   buffer[current_index].commit_charge =
@@ -97,8 +112,7 @@ std::uint64_t enumerate_vad(std::uint64_t target_cr3, std::uint64_t vad_root,
 
   // VAD root is RTL_AVL_TREE which just contains a pointer to root node
   std::uint64_t root_node = 0;
-  process::read_guest_virtual(target_cr3, vad_root, &root_node,
-                              sizeof(root_node));
+  read_guest_virt(target_cr3, vad_root, &root_node, sizeof(root_node));
 
   if (root_node != 0) {
     walk_vad_tree(target_cr3, root_node, buffer, max_count, count);

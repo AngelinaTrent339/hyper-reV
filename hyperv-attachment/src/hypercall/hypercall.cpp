@@ -553,13 +553,13 @@ void hypercall::process(const hypercall_info_t hypercall_info,
         action = static_cast<breakpoint_action_t>(*mapped);
     }
 
-    trap_frame->rax = breakpoint::add(gpa, size, type, action);
+    trap_frame->rax = npt_breakpoint::add(gpa, size, type, action);
     break;
   }
 
   case hypercall_type_t::remove_breakpoint: {
     // rdx = guest physical address
-    trap_frame->rax = breakpoint::remove(trap_frame->rdx) ? 1 : 0;
+    trap_frame->rax = npt_breakpoint::remove(trap_frame->rdx) ? 1 : 0;
     break;
   }
 
@@ -625,8 +625,8 @@ void hypercall::process(const hypercall_info_t hypercall_info,
     }
 
     trap_frame->rax =
-        breakpoint::add_conditional(gpa, size, type, action, condition_addr,
-                                    condition_value, condition_mask);
+        npt_breakpoint::add_conditional(gpa, size, type, action, condition_addr,
+                                        condition_value, condition_mask);
     break;
   }
 
@@ -641,8 +641,8 @@ void hypercall::process(const hypercall_info_t hypercall_info,
 
     std::uint64_t copied = 0;
     for (std::uint64_t i = 0;
-         i < breakpoint::max_breakpoints && copied < max_count; i++) {
-      breakpoint_def_t *bp = breakpoint::get(i);
+         i < npt_breakpoint::max_breakpoints && copied < max_count; i++) {
+      breakpoint_def_t *bp = npt_breakpoint::get(i);
       if (bp && bp->enabled) {
         std::uint64_t dest_gpa =
             memory_manager::translate_guest_virtual_address(
@@ -677,7 +677,7 @@ void hypercall::process(const hypercall_info_t hypercall_info,
     // Get hits into temp buffer
     breakpoint_hit_t temp_hits[256] = {};
     std::uint64_t actual_max = (max_count < 256) ? max_count : 256;
-    std::uint64_t hit_count = breakpoint::get_hits(temp_hits, actual_max);
+    std::uint64_t hit_count = npt_breakpoint::get_hits(temp_hits, actual_max);
 
     // Copy to guest
     for (std::uint64_t i = 0; i < hit_count; i++) {
@@ -700,7 +700,7 @@ void hypercall::process(const hypercall_info_t hypercall_info,
   }
 
   case hypercall_type_t::clear_breakpoint_hits: {
-    breakpoint::clear_hits();
+    npt_breakpoint::clear_hits();
     trap_frame->rax = 1;
     break;
   }

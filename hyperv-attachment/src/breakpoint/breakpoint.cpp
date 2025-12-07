@@ -4,6 +4,7 @@
 #include "../memory_manager/memory_manager.h"
 #include "../slat/cr3/cr3.h"
 #include "../slat/slat.h"
+#include <intrin.h>
 
 namespace npt_breakpoint {
 // ========================================================================

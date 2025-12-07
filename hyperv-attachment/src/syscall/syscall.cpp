@@ -2,7 +2,7 @@
 #include "../arch/arch.h"
 #include "../crt/crt.h"
 #include "../process/process.h"
-
+#include <intrin.h>
 
 namespace syscall_trace {
 // ========================================================================
