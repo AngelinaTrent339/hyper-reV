@@ -10,6 +10,7 @@
 #include "../memory/memory.h"
 #include "../process/process.h"
 #include "../syscall/syscall.h"
+#include "../trace/trace.h"
 
 #include "../arch/arch.h"
 #include "../crt/crt.h"
@@ -1000,6 +1001,86 @@ void hypercall::process(const hypercall_info_t hypercall_info,
       // Remove the hook to restore normal access
       trap_frame->rax = hook::remove_entry(gpa) ? 1 : 0;
     }
+    break;
+  }
+
+    // ========================================================================
+    // PHASE 7: INSTRUCTION TRACING
+    // ========================================================================
+
+  case hypercall_type_t::start_instruction_trace: {
+    // rdx = target CR3 (0 = all)
+    // r8 = start RIP (0 = immediate)
+    // r9 = end RIP (0 = never)
+    // Stack: max instructions (0 = unlimited)
+    const cr3 guest_cr3 = arch::get_guest_cr3();
+    const cr3 slat_cr3 = slat::hyperv_cr3();
+
+    const std::uint64_t target = trap_frame->rdx;
+    const std::uint64_t start = trap_frame->r8;
+    const std::uint64_t end = trap_frame->r9;
+
+    std::uint64_t max_count = 0;
+    std::uint64_t stack_gpa = memory_manager::translate_guest_virtual_address(
+        guest_cr3, slat_cr3, {.address = trap_frame->rsp + 0x28});
+    if (stack_gpa != 0) {
+      std::uint64_t size_left = 0;
+      std::uint64_t *mapped = static_cast<std::uint64_t *>(
+          memory_manager::map_guest_physical(slat_cr3, stack_gpa, &size_left));
+      if (mapped && size_left >= 8)
+        max_count = *mapped;
+    }
+
+    instruction_trace::start(target, start, end, max_count);
+    trap_frame->rax = 1;
+    break;
+  }
+
+  case hypercall_type_t::stop_instruction_trace: {
+    instruction_trace::stop();
+    trap_frame->rax = 1;
+    break;
+  }
+
+  case hypercall_type_t::get_instruction_trace: {
+    // rdx = buffer VA
+    // r8 = max count
+    const cr3 guest_cr3 = arch::get_guest_cr3();
+    const cr3 slat_cr3 = slat::hyperv_cr3();
+
+    const std::uint64_t buffer_va = trap_frame->rdx;
+    const std::uint64_t max_count = trap_frame->r8;
+
+    // Get trace into temp buffer
+    instruction_trace::trace_entry_t temp_trace[256] = {};
+    std::uint64_t actual_max = (max_count < 256) ? max_count : 256;
+    std::uint64_t count = instruction_trace::get_log(temp_trace, actual_max);
+
+    // Copy to guest
+    for (std::uint64_t i = 0; i < count; i++) {
+      std::uint64_t dest_gpa = memory_manager::translate_guest_virtual_address(
+          guest_cr3, slat_cr3,
+          {.address =
+               buffer_va + i * sizeof(instruction_trace::trace_entry_t)});
+      if (dest_gpa == 0)
+        break;
+
+      std::uint64_t size_left = 0;
+      void *dest =
+          memory_manager::map_guest_physical(slat_cr3, dest_gpa, &size_left);
+      if (!dest || size_left < sizeof(instruction_trace::trace_entry_t))
+        break;
+
+      crt::copy_memory(dest, &temp_trace[i],
+                       sizeof(instruction_trace::trace_entry_t));
+    }
+    trap_frame->rax = count;
+    break;
+  }
+
+  case hypercall_type_t::clear_instruction_trace: {
+    instruction_trace::clear_log();
+    trap_frame->rax = 1;
     break;
   }
 
