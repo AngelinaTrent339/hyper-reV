@@ -360,6 +360,70 @@ void hypercall::process(const hypercall_info_t hypercall_info,
 
     break;
   }
+
+  // ============================================================================
+  // HYPERVISOR-LEVEL SYSCALL INTERCEPTION (No SSDT needed!)
+  // ============================================================================
+  case hypercall_type_t::enable_syscall_intercept: {
+    // RDX = mode (0 = log_all, 1 = log_filtered)
+    // Returns: 1 on success, 0 on failure
+    // TODO: Implement syscall interception enable
+    // For now, we'll use NPT hook on LSTAR/KiSystemCall64
+    trap_frame->rax = 1;
+    break;
+  }
+  case hypercall_type_t::disable_syscall_intercept: {
+    // Disable syscall interception
+    // TODO: Remove NPT hooks on syscall entry points
+    trap_frame->rax = 1;
+    break;
+  }
+  case hypercall_type_t::set_syscall_filter: {
+    // RDX = syscall_min
+    // R8 = syscall_max
+    // R9 = cr3_filter (0 = all processes)
+    // TODO: Apply filter settings
+    trap_frame->rax = 1;
+    break;
+  }
+  case hypercall_type_t::flush_syscall_logs: {
+    // RDX = guest buffer virtual address
+    // R8 = max entries to copy
+    // Returns: number of entries copied
+    // TODO: Implement syscall log flush
+    trap_frame->rax = 0;
+    break;
+  }
+  case hypercall_type_t::get_syscall_log_count: {
+    // Returns: number of pending syscall log entries
+    // TODO: Return actual count
+    trap_frame->rax = 0;
+    break;
+  }
+  case hypercall_type_t::hook_lstar: {
+    // RDX = KiSystemCall64 virtual address (from LSTAR MSR)
+    // R8 = Shadow page physical address (with logging code)
+    // This hooks the syscall entry point directly at hypervisor level!
+    const virtual_address_t lstar_va = {.address = trap_frame->rdx};
+    const virtual_address_t shadow_pa = {.address = trap_frame->r8};
+
+    // Translate LSTAR VA to PA and add NPT hook
+    const cr3 guest_cr3 = arch::get_guest_cr3();
+    const cr3 slat_cr3 = slat::hyperv_cr3();
+
+    const std::uint64_t lstar_pa =
+        memory_manager::translate_guest_virtual_address(guest_cr3, slat_cr3,
+                                                        lstar_va);
+
+    if (lstar_pa != 0) {
+      // Add NPT hook: when KiSystemCall64 executes, use shadow page instead
+      trap_frame->rax = slat::hook::add({.address = lstar_pa}, shadow_pa);
+    } else {
+      trap_frame->rax = 0;
+    }
+    break;
+  }
+
   default:
     break;
   }
