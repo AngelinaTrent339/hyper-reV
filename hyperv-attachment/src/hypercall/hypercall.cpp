@@ -7,6 +7,7 @@
 #include "../slat/slat.h"
 
 #include "../breakpoint/breakpoint.h"
+#include "../memory/memory.h"
 #include "../process/process.h"
 #include "../syscall/syscall.h"
 
@@ -780,6 +781,225 @@ void hypercall::process(const hypercall_info_t hypercall_info,
   case hypercall_type_t::clear_syscall_log: {
     syscall_trace::clear_log();
     trap_frame->rax = 1;
+    break;
+  }
+
+    // ========================================================================
+    // PHASE 5: MEMORY ANALYSIS
+    // ========================================================================
+
+  case hypercall_type_t::enumerate_vad: {
+    // rdx = target CR3
+    // r8 = VAD root address (from EPROCESS)
+    // r9 = buffer VA
+    // Stack: max count
+    const cr3 guest_cr3 = arch::get_guest_cr3();
+    const cr3 slat_cr3 = slat::hyperv_cr3();
+
+    const std::uint64_t target_cr3 = trap_frame->rdx;
+    const std::uint64_t vad_root = trap_frame->r8;
+    const std::uint64_t buffer_va = trap_frame->r9;
+
+    std::uint64_t max_count = 128;
+    std::uint64_t stack_gpa = memory_manager::translate_guest_virtual_address(
+        guest_cr3, slat_cr3, {.address = trap_frame->rsp + 0x28});
+    if (stack_gpa != 0) {
+      std::uint64_t size_left = 0;
+      std::uint64_t *mapped = static_cast<std::uint64_t *>(
+          memory_manager::map_guest_physical(slat_cr3, stack_gpa, &size_left));
+      if (mapped && size_left >= 8)
+        max_count = *mapped;
+    }
+
+    // Enumerate into temp buffer
+    vad_info_t temp_vads[256] = {};
+    std::uint64_t actual_max = (max_count < 256) ? max_count : 256;
+    std::uint64_t count = memory_analysis::enumerate_vad(target_cr3, vad_root,
+                                                         temp_vads, actual_max);
+
+    // Copy to guest
+    for (std::uint64_t i = 0; i < count; i++) {
+      std::uint64_t dest_gpa = memory_manager::translate_guest_virtual_address(
+          guest_cr3, slat_cr3, {.address = buffer_va + i * sizeof(vad_info_t)});
+      if (dest_gpa == 0)
+        break;
+
+      std::uint64_t size_left = 0;
+      void *dest =
+          memory_manager::map_guest_physical(slat_cr3, dest_gpa, &size_left);
+      if (!dest || size_left < sizeof(vad_info_t))
+        break;
+
+      crt::copy_memory(dest, &temp_vads[i], sizeof(vad_info_t));
+    }
+    trap_frame->rax = count;
+    break;
+  }
+
+  case hypercall_type_t::search_memory_pattern: {
+    // rdx = target CR3
+    // r8 = start address
+    // r9 = size
+    // Stack args: pattern pointer, pattern length, results buffer, max results
+    const cr3 guest_cr3 = arch::get_guest_cr3();
+    const cr3 slat_cr3 = slat::hyperv_cr3();
+
+    const std::uint64_t target_cr3 = trap_frame->rdx;
+    const std::uint64_t start_addr = trap_frame->r8;
+    const std::uint64_t scan_size = trap_frame->r9;
+
+    // Read stack args
+    std::uint64_t pattern_va = 0, pattern_len = 0, results_va = 0,
+                  max_results = 64;
+
+    auto read_stack_arg = [&](std::uint64_t offset) -> std::uint64_t {
+      std::uint64_t arg_gpa = memory_manager::translate_guest_virtual_address(
+          guest_cr3, slat_cr3, {.address = trap_frame->rsp + offset});
+      if (arg_gpa == 0)
+        return 0;
+      std::uint64_t size_left = 0;
+      std::uint64_t *mapped = static_cast<std::uint64_t *>(
+          memory_manager::map_guest_physical(slat_cr3, arg_gpa, &size_left));
+      return (mapped && size_left >= 8) ? *mapped : 0;
+    };
+
+    pattern_va = read_stack_arg(0x28);
+    pattern_len = read_stack_arg(0x30);
+    results_va = read_stack_arg(0x38);
+    max_results = read_stack_arg(0x40);
+
+    if (pattern_len > 128)
+      pattern_len = 128;
+    if (max_results > 128)
+      max_results = 128;
+
+    // Read pattern from guest
+    std::uint8_t pattern[128] = {};
+    std::uint8_t mask[128] = {};
+
+    std::uint64_t pattern_gpa = memory_manager::translate_guest_virtual_address(
+        guest_cr3, slat_cr3, {.address = pattern_va});
+    if (pattern_gpa != 0) {
+      std::uint64_t size_left = 0;
+      void *pattern_src =
+          memory_manager::map_guest_physical(slat_cr3, pattern_gpa, &size_left);
+      if (pattern_src && size_left >= pattern_len)
+        crt::copy_memory(pattern, pattern_src, pattern_len);
+    }
+
+    // No mask for now - full match
+    crt::set_memory(mask, 'x', pattern_len);
+
+    // Scan
+    memory_analysis::pattern_result_t results[128] = {};
+    std::uint64_t found = memory_analysis::scan_pattern(
+        target_cr3, start_addr, scan_size, pattern, mask, pattern_len, results,
+        max_results);
+
+    // Copy results to guest
+    for (std::uint64_t i = 0; i < found; i++) {
+      std::uint64_t dest_gpa = memory_manager::translate_guest_virtual_address(
+          guest_cr3, slat_cr3,
+          {.address =
+               results_va + i * sizeof(memory_analysis::pattern_result_t)});
+      if (dest_gpa == 0)
+        break;
+
+      std::uint64_t size_left = 0;
+      void *dest =
+          memory_manager::map_guest_physical(slat_cr3, dest_gpa, &size_left);
+      if (!dest || size_left < sizeof(memory_analysis::pattern_result_t))
+        break;
+
+      crt::copy_memory(dest, &results[i],
+                       sizeof(memory_analysis::pattern_result_t));
+    }
+    trap_frame->rax = found;
+    break;
+  }
+
+  case hypercall_type_t::dump_module: {
+    // rdx = target CR3
+    // r8 = module base
+    // r9 = buffer VA
+    // Stack: buffer size
+    const cr3 guest_cr3 = arch::get_guest_cr3();
+    const cr3 slat_cr3 = slat::hyperv_cr3();
+
+    const std::uint64_t target_cr3 = trap_frame->rdx;
+    const std::uint64_t module_base = trap_frame->r8;
+    const std::uint64_t buffer_va = trap_frame->r9;
+
+    std::uint64_t buffer_size = 0;
+    std::uint64_t stack_gpa = memory_manager::translate_guest_virtual_address(
+        guest_cr3, slat_cr3, {.address = trap_frame->rsp + 0x28});
+    if (stack_gpa != 0) {
+      std::uint64_t size_left = 0;
+      std::uint64_t *mapped = static_cast<std::uint64_t *>(
+          memory_manager::map_guest_physical(slat_cr3, stack_gpa, &size_left));
+      if (mapped && size_left >= 8)
+        buffer_size = *mapped;
+    }
+
+    // Dump page by page to guest buffer
+    std::uint64_t dumped = 0;
+    std::uint8_t page_buffer[0x1000];
+
+    while (dumped < buffer_size) {
+      std::uint64_t remaining = buffer_size - dumped;
+      std::uint64_t to_read = (remaining < 0x1000) ? remaining : 0x1000;
+
+      // Read from target
+      std::uint64_t read = memory_analysis::read_memory(
+          target_cr3, module_base + dumped, page_buffer, to_read);
+      if (read == 0)
+        break;
+
+      // Write to guest buffer
+      std::uint64_t dest_gpa = memory_manager::translate_guest_virtual_address(
+          guest_cr3, slat_cr3, {.address = buffer_va + dumped});
+      if (dest_gpa == 0)
+        break;
+
+      std::uint64_t size_left = 0;
+      void *dest =
+          memory_manager::map_guest_physical(slat_cr3, dest_gpa, &size_left);
+      if (!dest)
+        break;
+
+      std::uint64_t to_write = (read < size_left) ? read : size_left;
+      crt::copy_memory(dest, page_buffer, to_write);
+      dumped += to_write;
+    }
+
+    trap_frame->rax = dumped;
+    break;
+  }
+
+    // ========================================================================
+    // PHASE 6: MEMORY CLOAKING
+    // ========================================================================
+
+  case hypercall_type_t::cloak_memory: {
+    // rdx = guest physical address of page to cloak
+    // r8 = shadow content VA (what AC should see)
+    // r9 = enable (1) or disable (0)
+
+    // This uses the existing SLAT hook mechanism!
+    // We set up a "read page" that AC sees vs "real page" that game uses
+
+    const std::uint64_t gpa = trap_frame->rdx;
+    const std::uint64_t shadow_va = trap_frame->r8;
+    const std::uint64_t enable = trap_frame->r9;
+
+    if (enable) {
+      // Use existing slat code hook mechanism
+      // This redirects reads to shadow page
+      trap_frame->rax = hook::add_entry(gpa, shadow_va) ? 1 : 0;
+    } else {
+      // Remove the hook to restore normal access
+      trap_frame->rax = hook::remove_entry(gpa) ? 1 : 0;
+    }
     break;
   }
 
