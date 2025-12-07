@@ -55,11 +55,8 @@ CLI::Option *add_command_flag(CLI::App *app, std::string flag_name) {
 CLI::App *init_status(CLI::App &app) {
   CLI::App *status =
       app.add_subcommand("status", "show current hypervisor and session status")
-          ->ignore_case();
-  app.add_subcommand("info", "alias for status")
-      ->ignore_case()
-      ->group("")
-      ->callback([status]() {});
+          ->ignore_case()
+          ->alias("info");
   return status;
 }
 
@@ -180,11 +177,9 @@ void process_help_cmd(CLI::App *help_cmd) {
 // ============================================================================
 
 CLI::App *init_rgpm(CLI::App &app, CLI::Transformer &aliases_transformer) {
-  CLI::App *rgpm =
-      app.add_subcommand("rgpm", "read guest physical memory")->ignore_case();
-  app.add_subcommand("read", "read guest physical memory (alias)")
-      ->ignore_case()
-      ->group("");
+  CLI::App *rgpm = app.add_subcommand("rgpm", "read guest physical memory")
+                       ->ignore_case()
+                       ->alias("read");
 
   add_transformed_command_option(rgpm, "physical_address", aliases_transformer)
       ->required();
@@ -214,11 +209,9 @@ void process_rgpm(CLI::App *rgpm) {
 }
 
 CLI::App *init_wgpm(CLI::App &app, CLI::Transformer &aliases_transformer) {
-  CLI::App *wgpm =
-      app.add_subcommand("wgpm", "write guest physical memory")->ignore_case();
-  app.add_subcommand("write", "write guest physical memory (alias)")
-      ->ignore_case()
-      ->group("");
+  CLI::App *wgpm = app.add_subcommand("wgpm", "write guest physical memory")
+                       ->ignore_case()
+                       ->alias("write");
 
   add_transformed_command_option(wgpm, "physical_address", aliases_transformer)
       ->required();
@@ -249,11 +242,9 @@ void process_wgpm(CLI::App *wgpm) {
 }
 
 CLI::App *init_cgpm(CLI::App &app, CLI::Transformer &aliases_transformer) {
-  CLI::App *cgpm =
-      app.add_subcommand("cgpm", "copy guest physical memory")->ignore_case();
-  app.add_subcommand("copy", "copy guest physical memory (alias)")
-      ->ignore_case()
-      ->group("");
+  CLI::App *cgpm = app.add_subcommand("cgpm", "copy guest physical memory")
+                       ->ignore_case()
+                       ->alias("copy");
 
   add_transformed_command_option(cgpm, "destination_physical_address",
                                  aliases_transformer)
@@ -304,11 +295,8 @@ void process_cgpm(CLI::App *cgpm) {
 CLI::App *init_gvat(CLI::App &app, CLI::Transformer &aliases_transformer) {
   CLI::App *gvat =
       app.add_subcommand("gvat", "translate virtual address to physical")
-          ->ignore_case();
-  app.add_subcommand("translate",
-                     "translate virtual address to physical (alias)")
-      ->ignore_case()
-      ->group("");
+          ->ignore_case()
+          ->alias("translate");
 
   add_transformed_command_option(gvat, "virtual_address", aliases_transformer)
       ->required();
@@ -338,11 +326,9 @@ void process_gvat(CLI::App *gvat) {
 }
 
 CLI::App *init_rgvm(CLI::App &app, CLI::Transformer &aliases_transformer) {
-  CLI::App *rgvm =
-      app.add_subcommand("rgvm", "read guest virtual memory")->ignore_case();
-  app.add_subcommand("vread", "read guest virtual memory (alias)")
-      ->ignore_case()
-      ->group("");
+  CLI::App *rgvm = app.add_subcommand("rgvm", "read guest virtual memory")
+                       ->ignore_case()
+                       ->alias("vread");
 
   add_transformed_command_option(rgvm, "virtual_address", aliases_transformer)
       ->required();
@@ -374,11 +360,9 @@ void process_rgvm(CLI::App *rgvm) {
 }
 
 CLI::App *init_wgvm(CLI::App &app, CLI::Transformer &aliases_transformer) {
-  CLI::App *wgvm =
-      app.add_subcommand("wgvm", "write guest virtual memory")->ignore_case();
-  app.add_subcommand("vwrite", "write guest virtual memory (alias)")
-      ->ignore_case()
-      ->group("");
+  CLI::App *wgvm = app.add_subcommand("wgvm", "write guest virtual memory")
+                       ->ignore_case()
+                       ->alias("vwrite");
 
   add_transformed_command_option(wgvm, "virtual_address", aliases_transformer)
       ->required();
@@ -411,11 +395,9 @@ void process_wgvm(CLI::App *wgvm) {
 }
 
 CLI::App *init_cgvm(CLI::App &app, CLI::Transformer &aliases_transformer) {
-  CLI::App *cgvm =
-      app.add_subcommand("cgvm", "copy guest virtual memory")->ignore_case();
-  app.add_subcommand("vcopy", "copy guest virtual memory (alias)")
-      ->ignore_case()
-      ->group("");
+  CLI::App *cgvm = app.add_subcommand("cgvm", "copy guest virtual memory")
+                       ->ignore_case()
+                       ->alias("vcopy");
 
   add_transformed_command_option(cgvm, "destination_virtual_address",
                                  aliases_transformer)
@@ -476,8 +458,8 @@ void process_cgvm(CLI::App *cgvm) {
 // ============================================================================
 
 CLI::App *init_dump(CLI::App &app, CLI::Transformer &aliases_transformer) {
-  CLI::App *dump = app.add_subcommand("dump", "hex dump memory")->ignore_case();
-  app.add_subcommand("db", "hex dump memory (alias)")->ignore_case()->group("");
+  CLI::App *dump =
+      app.add_subcommand("dump", "hex dump memory")->ignore_case()->alias("db");
 
   add_transformed_command_option(dump, "address", aliases_transformer)
       ->required();
@@ -529,9 +511,9 @@ void process_dump(CLI::App *dump) {
 }
 
 CLI::App *init_disasm(CLI::App &app, CLI::Transformer &aliases_transformer) {
-  CLI::App *dis =
-      app.add_subcommand("disasm", "disassemble code")->ignore_case();
-  app.add_subcommand("u", "disassemble code (alias)")->ignore_case()->group("");
+  CLI::App *dis = app.add_subcommand("disasm", "disassemble code")
+                      ->ignore_case()
+                      ->alias("u");
 
   add_transformed_command_option(dis, "address", aliases_transformer)
       ->required();
@@ -584,10 +566,8 @@ CLI::App *init_akh(CLI::App &app, CLI::Transformer &aliases_transformer) {
   CLI::App *akh =
       app.add_subcommand("akh",
                          "add kernel hook (format: --asmbytes 0xE8 0x12 ...)")
-          ->ignore_case();
-  app.add_subcommand("hook", "add kernel hook (alias)")
-      ->ignore_case()
-      ->group("");
+          ->ignore_case()
+          ->alias("hook");
 
   add_transformed_command_option(akh, "virtual_address", aliases_transformer)
       ->required();
@@ -645,11 +625,9 @@ void process_akh(CLI::App *akh) {
 }
 
 CLI::App *init_rkh(CLI::App &app, CLI::Transformer &aliases_transformer) {
-  CLI::App *rkh =
-      app.add_subcommand("rkh", "remove kernel hook")->ignore_case();
-  app.add_subcommand("unhook", "remove kernel hook (alias)")
-      ->ignore_case()
-      ->group("");
+  CLI::App *rkh = app.add_subcommand("rkh", "remove kernel hook")
+                      ->ignore_case()
+                      ->alias("unhook");
 
   add_transformed_command_option(rkh, "virtual_address", aliases_transformer)
       ->required();
@@ -675,10 +653,8 @@ void process_rkh(CLI::App *rkh) {
 CLI::App *init_hgpp(CLI::App &app, CLI::Transformer &aliases_transformer) {
   CLI::App *hgpp =
       app.add_subcommand("hgpp", "hide physical page from guest reads")
-          ->ignore_case();
-  app.add_subcommand("hide", "hide physical page (alias)")
-      ->ignore_case()
-      ->group("");
+          ->ignore_case()
+          ->alias("hide");
 
   add_transformed_command_option(hgpp, "physical_address", aliases_transformer)
       ->required();
@@ -704,10 +680,8 @@ void process_hgpp(CLI::App *hgpp) {
 
 CLI::App *init_fl(CLI::App &app) {
   CLI::App *fl = app.add_subcommand("fl", "flush and display trap frame logs")
-                     ->ignore_case();
-  app.add_subcommand("logs", "flush and display trap frame logs (alias)")
-      ->ignore_case()
-      ->group("");
+                     ->ignore_case()
+                     ->alias("logs");
 
   return fl;
 }
@@ -787,10 +761,8 @@ void process_fl(CLI::App *fl) {
 CLI::App *init_hfpc(CLI::App &app) {
   CLI::App *hfpc =
       app.add_subcommand("hfpc", "get hyperv-attachment heap free page count")
-          ->ignore_case();
-  app.add_subcommand("heap", "heap free page count (alias)")
-      ->ignore_case()
-      ->group("");
+          ->ignore_case()
+          ->alias("heap");
 
   return hfpc;
 }
@@ -806,11 +778,9 @@ void process_hfpc(CLI::App *hfpc) {
 }
 
 CLI::App *init_lkm(CLI::App &app) {
-  CLI::App *lkm =
-      app.add_subcommand("lkm", "list loaded kernel modules")->ignore_case();
-  app.add_subcommand("modules", "list loaded kernel modules (alias)")
-      ->ignore_case()
-      ->group("");
+  CLI::App *lkm = app.add_subcommand("lkm", "list loaded kernel modules")
+                      ->ignore_case()
+                      ->alias("modules");
 
   return lkm;
 }
@@ -834,10 +804,8 @@ void process_lkm(CLI::App *lkm) {
 
 CLI::App *init_kme(CLI::App &app) {
   CLI::App *kme = app.add_subcommand("kme", "list exports of a kernel module")
-                      ->ignore_case();
-  app.add_subcommand("exports", "list exports of a kernel module (alias)")
-      ->ignore_case()
-      ->group("");
+                      ->ignore_case()
+                      ->alias("exports");
 
   add_command_option(kme, "module_name")->required();
   add_command_option(kme, "--filter"); // optional filter
@@ -877,11 +845,9 @@ void process_kme(CLI::App *kme) {
 }
 
 CLI::App *init_dkm(CLI::App &app) {
-  CLI::App *dkm =
-      app.add_subcommand("dkm", "dump kernel module to file")->ignore_case();
-  app.add_subcommand("dumpmod", "dump kernel module to file (alias)")
-      ->ignore_case()
-      ->group("");
+  CLI::App *dkm = app.add_subcommand("dkm", "dump kernel module to file")
+                      ->ignore_case()
+                      ->alias("dumpmod");
 
   add_command_option(dkm, "module_name")->required();
   add_command_option(dkm, "output_directory")->required();
@@ -918,10 +884,8 @@ void process_dkm(CLI::App *dkm) {
 CLI::App *init_gva(CLI::App &app, CLI::Transformer &aliases_transformer) {
   CLI::App *gva =
       app.add_subcommand("gva", "resolve alias to numerical address")
-          ->ignore_case();
-  app.add_subcommand("resolve", "resolve alias to address (alias)")
-      ->ignore_case()
-      ->group("");
+          ->ignore_case()
+          ->alias("resolve");
 
   add_transformed_command_option(gva, "alias_name", aliases_transformer)
       ->required();
