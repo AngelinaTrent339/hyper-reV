@@ -241,19 +241,56 @@ static const std::unordered_map<std::string, std::uint32_t>
 
 // Resolve syscall addresses using hypervisor read (invisible to PG)
 std::uint64_t resolve_syscalls_to_exports(sys::kernel_module_t &ntoskrnl) {
-  // Get KeServiceDescriptorTable address from exports
-  auto ssdt_it = ntoskrnl.exports.find("ntoskrnl.exe!KeServiceDescriptorTable");
-  if (ssdt_it == ntoskrnl.exports.end()) {
-    return 0;
-  }
+  // KeServiceDescriptorTable is NOT exported on x64 Windows
+  // We need to pattern scan for it inside ntoskrnl
 
-  std::uint64_t ke_service_descriptor_table = ssdt_it->second;
+  // Pattern: LEA r10, [KeServiceDescriptorTableShadow] = 4C 8D 15 XX XX XX XX
+  // This pattern is used in KiSystemServiceRepeat
+  const std::uint8_t pattern[] = {0x4C, 0x8D, 0x15}; // lea r10, [rip+XXX]
+  const std::uint64_t pattern_size = sizeof(pattern);
 
-  // Read KiServiceTable pointer (first member of KeServiceDescriptorTable)
+  // Read ntoskrnl .text section to find the pattern
+  // We'll scan a reasonable range from the base
+  constexpr std::uint64_t scan_size = 0x800000; // 8MB should cover .text
+  std::vector<std::uint8_t> ntoskrnl_bytes(scan_size);
+
+  hypercall::read_guest_virtual_memory(ntoskrnl_bytes.data(),
+                                       ntoskrnl.base_address, sys::current_cr3,
+                                       scan_size);
+
   std::uint64_t ki_service_table = 0;
-  hypercall::read_guest_virtual_memory(&ki_service_table,
-                                       ke_service_descriptor_table,
-                                       sys::current_cr3, sizeof(std::uint64_t));
+
+  // Scan for the pattern
+  for (std::uint64_t i = 0; i < scan_size - 16; i++) {
+    if (ntoskrnl_bytes[i] == pattern[0] &&
+        ntoskrnl_bytes[i + 1] == pattern[1] &&
+        ntoskrnl_bytes[i + 2] == pattern[2]) {
+
+      // Found potential match - extract the RIP-relative offset
+      std::int32_t rip_offset =
+          *reinterpret_cast<std::int32_t *>(&ntoskrnl_bytes[i + 3]);
+
+      // Calculate the actual address: RIP + offset + instruction_size(7)
+      std::uint64_t instruction_addr = ntoskrnl.base_address + i;
+      std::uint64_t target_addr = instruction_addr + 7 + rip_offset;
+
+      // Verify this looks like a valid kernel address
+      if ((target_addr >> 48) == 0xFFFF &&
+          target_addr > ntoskrnl.base_address) {
+        // Read the first QWORD from the target to get KiServiceTable
+        std::uint64_t potential_table = 0;
+        hypercall::read_guest_virtual_memory(&potential_table, target_addr,
+                                             sys::current_cr3,
+                                             sizeof(std::uint64_t));
+
+        // Verify it's a valid kernel pointer
+        if ((potential_table >> 48) == 0xFFFF) {
+          ki_service_table = potential_table;
+          break;
+        }
+      }
+    }
+  }
 
   if (ki_service_table == 0) {
     return 0;
