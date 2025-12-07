@@ -683,12 +683,88 @@ CLI::App *init_fl(CLI::App &app) {
                      ->ignore_case()
                      ->alias("logs");
 
+  add_command_option(fl, "--count"); // limit number of logs to show
+  add_command_flag(fl, "--compact"); // compact single-line view
+  add_command_flag(fl, "--regs"); // show all registers (default in full mode)
+
   return fl;
+}
+
+// Helper: resolve address to module!symbol+offset format
+std::string resolve_symbol(std::uint64_t address) {
+  if (address == 0)
+    return "(null)";
+
+  // Check if it's a kernel address
+  if ((address >> 48) != 0xFFFF) {
+    return std::format("0x{:X} (user)", address);
+  }
+
+  // Find containing module
+  for (const auto &[module_name, module_info] : sys::kernel::modules_list) {
+    std::uint64_t module_end = module_info.base_address + module_info.size;
+
+    if (address >= module_info.base_address && address < module_end) {
+      std::uint64_t offset = address - module_info.base_address;
+
+      // Try to find nearest export
+      std::string nearest_export;
+      std::uint64_t nearest_distance = UINT64_MAX;
+
+      for (const auto &[export_name, export_addr] : module_info.exports) {
+        if (export_addr <= address &&
+            (address - export_addr) < nearest_distance) {
+          nearest_distance = address - export_addr;
+          // Extract just the function name (after the !)
+          size_t bang_pos = export_name.find('!');
+          if (bang_pos != std::string::npos) {
+            nearest_export = export_name.substr(bang_pos + 1);
+          } else {
+            nearest_export = export_name;
+          }
+        }
+      }
+
+      if (!nearest_export.empty() && nearest_distance < 0x10000) {
+        if (nearest_distance == 0) {
+          return std::format("{}!{}", module_name, nearest_export);
+        } else {
+          return std::format("{}!{}+0x{:X}", module_name, nearest_export,
+                             nearest_distance);
+        }
+      }
+
+      return std::format("{}+0x{:X}", module_name, offset);
+    }
+  }
+
+  return std::format("0x{:016X}", address);
+}
+
+// Helper: classify pointer type
+std::string classify_pointer(std::uint64_t value) {
+  if (value == 0)
+    return "NULL";
+  if ((value >> 48) == 0xFFFF) {
+    if ((value & 0xF000'0000'0000) == 0xF000'0000'0000)
+      return "KRNL";
+    return "KERN";
+  }
+  if (value < 0x10000)
+    return "SMAL";
+  if (value < 0x7FFF'FFFF'FFFF)
+    return "USER";
+  return "????";
 }
 
 void process_fl(CLI::App *fl) {
   constexpr std::uint64_t log_count = 100;
   constexpr std::uint64_t failed_log_count = static_cast<std::uint64_t>(-1);
+
+  const std::uint64_t max_show =
+      get_command_option<std::uint64_t>(fl, "--count");
+  const std::uint8_t compact_mode = get_command_flag(fl, "--compact");
+  const std::uint8_t show_regs = get_command_flag(fl, "--regs");
 
   std::vector<trap_frame_log_t> logs(log_count);
 
@@ -704,54 +780,150 @@ void process_fl(CLI::App *fl) {
     return;
   }
 
-  console::success(std::format("Flushed {} log entries", logs_flushed));
+  const std::uint64_t show_count =
+      (max_show > 0 && max_show < logs_flushed) ? max_show : logs_flushed;
+
+  std::println("");
+  std::println("{}"
+               "╔══════════════════════════════════════════════════════════════"
+               "════════════════╗{}",
+               console::color::cyan, console::color::reset);
+  std::println("{}║{} {}TRAP FRAME LOGS{} - {} entries captured, showing {}    "
+               "                          {}║{}",
+               console::color::cyan, console::color::reset,
+               console::color::bold, console::color::reset, logs_flushed,
+               show_count, console::color::cyan, console::color::reset);
+  std::println("{}"
+               "╚══════════════════════════════════════════════════════════════"
+               "════════════════╝{}",
+               console::color::cyan, console::color::reset);
   std::println("");
 
-  for (std::uint64_t i = 0; i < logs_flushed; i++) {
+  for (std::uint64_t i = 0; i < show_count; i++) {
     const trap_frame_log_t &log = logs[i];
 
     if (log.rip == 0)
       break;
 
-    console::separator(std::format("Log #{}", i + 1));
+    std::string rip_symbol = resolve_symbol(log.rip);
+    std::string caller_symbol = (log.stack_data[0] != 0)
+                                    ? resolve_symbol(log.stack_data[0])
+                                    : "(unknown)";
 
-    // Registers in a clean format
-    console::print_value("RIP", log.rip);
-    console::print_value("CR3", log.cr3);
-    std::println("");
+    if (compact_mode) {
+      // Compact single-line format
+      std::println("{}#{:3}{} {}RIP{} {:016X}  {}CR3{} {:08X}  {}Caller{} {}",
+                   console::color::dim, i + 1, console::color::reset,
+                   console::color::gray, console::color::reset, log.rip,
+                   console::color::gray, console::color::reset,
+                   log.cr3 & 0xFFFFFFFF, console::color::gray,
+                   console::color::reset, caller_symbol);
+    } else {
+      // Full detailed format
+      std::println("{}"
+                   "┌──────────────────────────────────────────────────────────"
+                   "────────────────────┐{}",
+                   console::color::dim, console::color::reset);
+      std::println("{}│{} {}LOG #{}{:<4}                                       "
+                   "                              {}│{}",
+                   console::color::dim, console::color::reset,
+                   console::color::bold, console::color::reset, i + 1,
+                   console::color::dim, console::color::reset);
+      std::println("{}"
+                   "├──────────────────────────────────────────────────────────"
+                   "────────────────────┤{}",
+                   console::color::dim, console::color::reset);
 
-    std::println(
-        "  {}RAX{} {:016X}  {}RCX{} {:016X}  {}RDX{} {:016X}  {}RBX{} {:016X}",
-        console::color::gray, console::color::reset, log.rax,
-        console::color::gray, console::color::reset, log.rcx,
-        console::color::gray, console::color::reset, log.rdx,
-        console::color::gray, console::color::reset, log.rbx);
-    std::println(
-        "  {}RSP{} {:016X}  {}RBP{} {:016X}  {}RSI{} {:016X}  {}RDI{} {:016X}",
-        console::color::gray, console::color::reset, log.rsp,
-        console::color::gray, console::color::reset, log.rbp,
-        console::color::gray, console::color::reset, log.rsi,
-        console::color::gray, console::color::reset, log.rdi);
-    std::println(
-        "  {}R8 {} {:016X}  {}R9 {} {:016X}  {}R10{} {:016X}  {}R11{} {:016X}",
-        console::color::gray, console::color::reset, log.r8,
-        console::color::gray, console::color::reset, log.r9,
-        console::color::gray, console::color::reset, log.r10,
-        console::color::gray, console::color::reset, log.r11);
-    std::println(
-        "  {}R12{} {:016X}  {}R13{} {:016X}  {}R14{} {:016X}  {}R15{} {:016X}",
-        console::color::gray, console::color::reset, log.r12,
-        console::color::gray, console::color::reset, log.r13,
-        console::color::gray, console::color::reset, log.r14,
-        console::color::gray, console::color::reset, log.r15);
+      // RIP with symbol
+      std::println("{}│{}  {}RIP{} {:016X}  →  {}{}{}", console::color::dim,
+                   console::color::reset, console::color::yellow,
+                   console::color::reset, log.rip, console::color::green,
+                   rip_symbol, console::color::reset);
 
-    std::println("\n  {}Stack:{}", console::color::dim, console::color::reset);
-    for (const std::uint64_t stack_value : log.stack_data) {
-      if (stack_value != 0)
-        std::println("    0x{:016X}", stack_value);
+      // CR3 (process context)
+      std::println("{}│{}  {}CR3{} {:016X}  {}(process page table){}",
+                   console::color::dim, console::color::reset,
+                   console::color::magenta, console::color::reset, log.cr3,
+                   console::color::dim, console::color::reset);
+
+      // Caller (return address)
+      std::println("{}│{}  {}RET{} {:016X}  →  {}{}{}", console::color::dim,
+                   console::color::reset, console::color::cyan,
+                   console::color::reset, log.stack_data[0],
+                   console::color::green, caller_symbol, console::color::reset);
+
+      std::println("{}│{}", console::color::dim, console::color::reset);
+
+      // Arguments (Windows x64 ABI: RCX, RDX, R8, R9)
+      std::println("{}│{}  {}═══ Arguments (x64 ABI) ═══{}",
+                   console::color::dim, console::color::reset,
+                   console::color::bold, console::color::reset);
+      std::println("{}│{}  {}Arg1 (RCX){} {:016X}  [{}]", console::color::dim,
+                   console::color::reset, console::color::yellow,
+                   console::color::reset, log.rcx, classify_pointer(log.rcx));
+      std::println("{}│{}  {}Arg2 (RDX){} {:016X}  [{}]", console::color::dim,
+                   console::color::reset, console::color::yellow,
+                   console::color::reset, log.rdx, classify_pointer(log.rdx));
+      std::println("{}│{}  {}Arg3 (R8) {} {:016X}  [{}]", console::color::dim,
+                   console::color::reset, console::color::yellow,
+                   console::color::reset, log.r8, classify_pointer(log.r8));
+      std::println("{}│{}  {}Arg4 (R9) {} {:016X}  [{}]", console::color::dim,
+                   console::color::reset, console::color::yellow,
+                   console::color::reset, log.r9, classify_pointer(log.r9));
+
+      // Full registers (if --regs or default in full mode)
+      std::println("{}│{}", console::color::dim, console::color::reset);
+      std::println("{}│{}  {}═══ General Purpose Registers ═══{}",
+                   console::color::dim, console::color::reset,
+                   console::color::bold, console::color::reset);
+      std::println("{}│{}  RAX {:016X}  RBX {:016X}  RCX {:016X}  RDX {:016X}",
+                   console::color::dim, console::color::reset, log.rax, log.rbx,
+                   log.rcx, log.rdx);
+      std::println("{}│{}  RSP {:016X}  RBP {:016X}  RSI {:016X}  RDI {:016X}",
+                   console::color::dim, console::color::reset, log.rsp, log.rbp,
+                   log.rsi, log.rdi);
+      std::println("{}│{}  R8  {:016X}  R9  {:016X}  R10 {:016X}  R11 {:016X}",
+                   console::color::dim, console::color::reset, log.r8, log.r9,
+                   log.r10, log.r11);
+      std::println("{}│{}  R12 {:016X}  R13 {:016X}  R14 {:016X}  R15 {:016X}",
+                   console::color::dim, console::color::reset, log.r12, log.r13,
+                   log.r14, log.r15);
+
+      // Stack with symbol resolution
+      std::println("{}│{}", console::color::dim, console::color::reset);
+      std::println("{}│{}  {}═══ Stack (top {} QWORDs) ═══{}",
+                   console::color::dim, console::color::reset,
+                   console::color::bold, trap_frame_log_stack_data_count,
+                   console::color::reset);
+
+      for (std::uint64_t s = 0; s < trap_frame_log_stack_data_count; s++) {
+        std::uint64_t stack_val = log.stack_data[s];
+        if (stack_val != 0) {
+          std::string stack_sym = resolve_symbol(stack_val);
+          std::string annotation = (s == 0) ? " ← return addr" : "";
+          std::println("{}│{}  [RSP+{:02X}] {:016X}  {}{}{}{}",
+                       console::color::dim, console::color::reset, s * 8,
+                       stack_val, console::color::dim, stack_sym, annotation,
+                       console::color::reset);
+        }
+      }
+
+      std::println("{}"
+                   "└──────────────────────────────────────────────────────────"
+                   "────────────────────┘{}",
+                   console::color::dim, console::color::reset);
+      std::println("");
     }
+  }
+
+  if (compact_mode && show_count > 0) {
     std::println("");
   }
+
+  std::println("{}Tip:{} Use --compact for one-line summaries, or 'logs "
+               "--count 5' for fewer entries",
+               console::color::dim, console::color::reset);
+  std::println("");
 }
 
 // ============================================================================
