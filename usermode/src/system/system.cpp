@@ -7,7 +7,6 @@
 #include "../hook/hook.h"
 #include "../hypercall/hypercall.h"
 
-
 #include <portable_executable/image.hpp>
 
 #include <Windows.h>
@@ -15,7 +14,6 @@
 #include <print>
 #include <vector>
 #include <winternl.h>
-
 
 extern "C" NTSTATUS NTAPI RtlAdjustPrivilege(
     std::uint32_t privilege, std::uint8_t enable, std::uint8_t current_thread,
@@ -115,6 +113,185 @@ void add_module_to_list(const std::string &module_name,
   kernel_module.size = module_size;
 
   sys::kernel::modules_list[module_name] = kernel_module;
+}
+
+// Windows 11 24H2 syscall table - maps Nt* function names to syscall numbers
+// This allows resolving internal syscall addresses without touching
+// PG-protected structures
+static const std::unordered_map<std::string, std::uint32_t>
+    syscall_numbers_24h2 = {
+        {"NtAccessCheck", 0},
+        {"NtWorkerFactoryWorkerReady", 1},
+        {"NtAcceptConnectPort", 2},
+        {"NtMapUserPhysicalPagesScatter", 3},
+        {"NtWaitForSingleObject", 4},
+        {"NtCallbackReturn", 5},
+        {"NtReadFile", 6},
+        {"NtDeviceIoControlFile", 7},
+        {"NtWriteFile", 8},
+        {"NtRemoveIoCompletion", 9},
+        {"NtReleaseSemaphore", 10},
+        {"NtReplyWaitReceivePort", 11},
+        {"NtReplyPort", 12},
+        {"NtSetInformationThread", 13},
+        {"NtSetEvent", 14},
+        {"NtClose", 15},
+        {"NtQueryObject", 16},
+        {"NtQueryInformationFile", 17},
+        {"NtOpenKey", 18},
+        {"NtEnumerateValueKey", 19},
+        {"NtFindAtom", 20},
+        {"NtQueryDefaultLocale", 21},
+        {"NtQueryKey", 22},
+        {"NtQueryValueKey", 23},
+        {"NtAllocateVirtualMemory", 24},
+        {"NtQueryInformationProcess", 25},
+        {"NtWaitForMultipleObjects32", 26},
+        {"NtWriteFileGather", 27},
+        {"NtSetInformationProcess", 28},
+        {"NtCreateKey", 29},
+        {"NtFreeVirtualMemory", 30},
+        {"NtImpersonateClientOfPort", 31},
+        {"NtReleaseMutant", 32},
+        {"NtQueryInformationToken", 33},
+        {"NtRequestWaitReplyPort", 34},
+        {"NtQueryVirtualMemory", 35},
+        {"NtOpenThreadToken", 36},
+        {"NtQueryInformationThread", 37},
+        {"NtOpenProcess", 38},
+        {"NtSetInformationFile", 39},
+        {"NtMapViewOfSection", 40},
+        {"NtAccessCheckAndAuditAlarm", 41},
+        {"NtUnmapViewOfSection", 42},
+        {"NtReplyWaitReceivePortEx", 43},
+        {"NtTerminateProcess", 44},
+        {"NtSetEventBoostPriority", 45},
+        {"NtReadFileScatter", 46},
+        {"NtOpenThreadTokenEx", 47},
+        {"NtOpenProcessTokenEx", 48},
+        {"NtQueryPerformanceCounter", 49},
+        {"NtEnumerateKey", 50},
+        {"NtOpenFile", 51},
+        {"NtDelayExecution", 52},
+        {"NtQueryDirectoryFile", 53},
+        {"NtQuerySystemInformation", 54},
+        {"NtOpenSection", 55},
+        {"NtQueryTimer", 56},
+        {"NtFsControlFile", 57},
+        {"NtWriteVirtualMemory", 58},
+        {"NtCloseObjectAuditAlarm", 59},
+        {"NtDuplicateObject", 60},
+        {"NtQueryAttributesFile", 61},
+        {"NtClearEvent", 62},
+        {"NtReadVirtualMemory", 63},
+        {"NtOpenEvent", 64},
+        {"NtAdjustPrivilegesToken", 65},
+        {"NtDuplicateToken", 66},
+        {"NtContinue", 67},
+        {"NtQueryDefaultUILanguage", 68},
+        {"NtQueueApcThread", 69},
+        {"NtYieldExecution", 70},
+        {"NtAddAtom", 71},
+        {"NtCreateEvent", 72},
+        {"NtQueryVolumeInformationFile", 73},
+        {"NtCreateSection", 74},
+        {"NtFlushBuffersFile", 75},
+        {"NtApphelpCacheControl", 76},
+        {"NtCreateProcessEx", 77},
+        {"NtCreateThread", 78},
+        {"NtIsProcessInJob", 79},
+        {"NtProtectVirtualMemory", 80},
+        {"NtQuerySection", 81},
+        {"NtResumeThread", 82},
+        {"NtTerminateThread", 83},
+        {"NtReadRequestData", 84},
+        {"NtCreateFile", 85},
+        {"NtQueryEvent", 86},
+        {"NtWriteRequestData", 87},
+        {"NtOpenDirectoryObject", 88},
+        {"NtAccessCheckByTypeAndAuditAlarm", 89},
+        {"NtQuerySystemTime", 90},
+        {"NtWaitForMultipleObjects", 91},
+        {"NtSetInformationObject", 92},
+        {"NtCancelIoFile", 93},
+        {"NtTraceEvent", 94},
+        {"NtPowerInformation", 95},
+        {"NtSetValueKey", 96},
+        {"NtCancelTimer", 97},
+        {"NtSetTimer", 98},
+        // High-value syscalls for reversing
+        {"NtRaiseHardError", 373},
+        {"NtRaiseException", 372},
+        {"NtSystemDebugControl", 464},
+        {"NtCreateThreadEx", 201},
+        {"NtCreateUserProcess", 209},
+        {"NtLoadDriver", 270},
+        {"NtUnloadDriver", 473},
+        {"NtSuspendProcess", 462},
+        {"NtResumeProcess", 394},
+        {"NtSuspendThread", 463},
+        {"NtGetContextThread", 251},
+        {"NtSetContextThread", 410},
+        {"NtDebugActiveProcess", 214},
+        {"NtDebugContinue", 215},
+        {"NtRemoveProcessDebug", 384},
+        {"NtCreateDebugObject", 171},
+        {"NtWaitForDebugEvent", 484},
+};
+
+// Resolve syscall addresses using hypervisor read (invisible to PG)
+std::uint64_t resolve_syscalls_to_exports(sys::kernel_module_t &ntoskrnl) {
+  // Get KeServiceDescriptorTable address from exports
+  auto ssdt_it = ntoskrnl.exports.find("ntoskrnl.exe!KeServiceDescriptorTable");
+  if (ssdt_it == ntoskrnl.exports.end()) {
+    return 0;
+  }
+
+  std::uint64_t ke_service_descriptor_table = ssdt_it->second;
+
+  // Read KiServiceTable pointer (first member of KeServiceDescriptorTable)
+  std::uint64_t ki_service_table = 0;
+  hypercall::read_guest_virtual_memory(&ki_service_table,
+                                       ke_service_descriptor_table,
+                                       sys::current_cr3, sizeof(std::uint64_t));
+
+  if (ki_service_table == 0) {
+    return 0;
+  }
+
+  std::uint64_t syscalls_resolved = 0;
+
+  // For each syscall in our table, calculate the kernel address
+  for (const auto &[name, syscall_num] : syscall_numbers_24h2) {
+    // Read the 4-byte relative offset from KiServiceTable
+    std::int32_t relative_offset = 0;
+    hypercall::read_guest_virtual_memory(
+        &relative_offset, ki_service_table + (syscall_num * 4),
+        sys::current_cr3, sizeof(std::int32_t));
+
+    if (relative_offset == 0) {
+      continue;
+    }
+
+    // On x64, the offset is stored with argument count in low 4 bits
+    // Real offset = (table_entry >> 4)
+    std::uint64_t kernel_address = ki_service_table + (relative_offset >> 4);
+
+    // Add to exports with both plain name and prefixed name
+    ntoskrnl.exports[name] = kernel_address;
+    ntoskrnl.exports["ntoskrnl.exe!" + name] = kernel_address;
+
+    // Also add Zw* variant (they point to same address)
+    if (name.starts_with("Nt")) {
+      std::string zw_name = "Zw" + name.substr(2);
+      ntoskrnl.exports[zw_name] = kernel_address;
+      ntoskrnl.exports["ntoskrnl.exe!" + zw_name] = kernel_address;
+    }
+
+    syscalls_resolved++;
+  }
+
+  return syscalls_resolved;
 }
 
 void erase_unused_modules(
