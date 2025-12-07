@@ -8,7 +8,7 @@
 
 #include "../breakpoint/breakpoint.h"
 #include "../process/process.h"
-
+#include "../syscall/syscall.h"
 
 #include "../arch/arch.h"
 #include "../crt/crt.h"
@@ -18,6 +18,7 @@
 #include <ia32-doc/ia32.hpp>
 #include <structures/breakpoint_info.h>
 #include <structures/process_info.h>
+#include <structures/syscall_info.h>
 
 std::uint64_t
 operate_on_guest_physical_memory(const trap_frame_t *const trap_frame,
@@ -697,6 +698,87 @@ void hypercall::process(const hypercall_info_t hypercall_info,
 
   case hypercall_type_t::clear_breakpoint_hits: {
     breakpoint::clear_hits();
+    trap_frame->rax = 1;
+    break;
+  }
+
+    // ========================================================================
+    // PHASE 4: SYSCALL TRACING
+    // ========================================================================
+
+  case hypercall_type_t::enable_syscall_trace: {
+    // rdx = target CR3 (0 = all processes)
+    syscall_trace::enable(trap_frame->rdx);
+    trap_frame->rax = 1;
+    break;
+  }
+
+  case hypercall_type_t::disable_syscall_trace: {
+    syscall_trace::disable();
+    trap_frame->rax = 1;
+    break;
+  }
+
+  case hypercall_type_t::set_syscall_filter: {
+    // rdx = action (0 = clear, 1 = add, 2 = remove, 3 = set mode)
+    // r8 = syscall ID or mode value
+    const std::uint64_t action = trap_frame->rdx;
+    const std::uint64_t value = trap_frame->r8;
+
+    switch (action) {
+    case 0:
+      syscall_trace::clear_filters();
+      break;
+    case 1:
+      syscall_trace::add_filter(value);
+      break;
+    case 2:
+      syscall_trace::remove_filter(value);
+      break;
+    case 3:
+      syscall_trace::set_filter_mode(value != 0);
+      break;
+    }
+    trap_frame->rax = 1;
+    break;
+  }
+
+  case hypercall_type_t::get_syscall_log: {
+    // rdx = pointer to syscall_log_t array
+    // r8 = max count
+    const cr3 guest_cr3 = arch::get_guest_cr3();
+    const cr3 slat_cr3 = slat::hyperv_cr3();
+
+    const std::uint64_t buffer_va = trap_frame->rdx;
+    const std::uint64_t max_count = trap_frame->r8;
+
+    // Get log into temp buffer
+    syscall_log_t temp_log[512] = {};
+    std::uint64_t actual_max = (max_count < 512) ? max_count : 512;
+    std::uint64_t count = syscall_trace::get_log(temp_log, actual_max);
+
+    // Copy to guest
+    for (std::uint64_t i = 0; i < count; i++) {
+      std::uint64_t dest_gpa = memory_manager::translate_guest_virtual_address(
+          guest_cr3, slat_cr3,
+          {.address = buffer_va + i * sizeof(syscall_log_t)});
+      if (dest_gpa == 0)
+        break;
+
+      std::uint64_t size_left = 0;
+      void *dest =
+          memory_manager::map_guest_physical(slat_cr3, dest_gpa, &size_left);
+      if (!dest || size_left < sizeof(syscall_log_t))
+        break;
+
+      crt::copy_memory(dest, &temp_log[i], sizeof(syscall_log_t));
+    }
+    trap_frame->rax = count;
+    break;
+  }
+
+  case hypercall_type_t::clear_syscall_log: {
+    syscall_trace::clear_log();
     trap_frame->rax = 1;
     break;
   }
