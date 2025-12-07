@@ -7,6 +7,7 @@
 #include "../slat/slat.h"
 
 #include "../breakpoint/breakpoint.h"
+#include "../execute/execute.h"
 #include "../memory/memory.h"
 #include "../process/process.h"
 #include "../syscall/syscall.h"
@@ -1081,6 +1082,146 @@ void hypercall::process(const hypercall_info_t hypercall_info,
   case hypercall_type_t::clear_instruction_trace: {
     instruction_trace::clear_log();
     trap_frame->rax = 1;
+    break;
+  }
+
+    // ========================================================================
+    // PHASE 8: STEALTH CODE EXECUTION
+    // Bypasses Hyperion's DLL injection blocks, integrity checks, process scans
+    // ========================================================================
+
+  case hypercall_type_t::write_shellcode: {
+    // rdx = target CR3
+    // r8 = target VA
+    // r9 = shellcode buffer VA (in calling process)
+    // Stack args: shellcode size, cloak flag
+    const cr3 guest_cr3 = arch::get_guest_cr3();
+    const cr3 slat_cr3 = slat::hyperv_cr3();
+
+    const std::uint64_t target_cr3 = trap_frame->rdx;
+    const std::uint64_t target_va = trap_frame->r8;
+    const std::uint64_t shellcode_va = trap_frame->r9;
+
+    std::uint64_t shellcode_size = 0, cloak_flag = 1;
+    std::uint64_t stack_gpa = memory_manager::translate_guest_virtual_address(
+        guest_cr3, slat_cr3, {.address = trap_frame->rsp + 0x28});
+    if (stack_gpa != 0) {
+      std::uint64_t size_left = 0;
+      std::uint64_t *mapped = static_cast<std::uint64_t *>(
+          memory_manager::map_guest_physical(slat_cr3, stack_gpa, &size_left));
+      if (mapped && size_left >= 8)
+        shellcode_size = *mapped;
+    }
+
+    stack_gpa = memory_manager::translate_guest_virtual_address(
+        guest_cr3, slat_cr3, {.address = trap_frame->rsp + 0x30});
+    if (stack_gpa != 0) {
+      std::uint64_t size_left = 0;
+      std::uint64_t *mapped = static_cast<std::uint64_t *>(
+          memory_manager::map_guest_physical(slat_cr3, stack_gpa, &size_left));
+      if (mapped && size_left >= 8)
+        cloak_flag = *mapped;
+    }
+
+    // Read shellcode from caller's memory
+    std::uint8_t shellcode_buffer[4096] = {};
+    if (shellcode_size > sizeof(shellcode_buffer))
+      shellcode_size = sizeof(shellcode_buffer);
+
+    memory_analysis::read_memory(guest_cr3.flags, shellcode_va,
+                                 shellcode_buffer, shellcode_size);
+
+    // Write to target process via NPT
+    trap_frame->rax =
+        code_execute::write_shellcode(target_cr3, target_va, shellcode_buffer,
+                                      shellcode_size, cloak_flag != 0);
+    break;
+  }
+
+  case hypercall_type_t::execute_in_guest: {
+    // rdx = target CR3
+    // r8 = shellcode VA
+    // r9 = parameter
+    const std::uint64_t target_cr3 = trap_frame->rdx;
+    const std::uint64_t shellcode_va = trap_frame->r8;
+    const std::uint64_t parameter = trap_frame->r9;
+
+    trap_frame->rax =
+        code_execute::execute_at(target_cr3, shellcode_va, parameter) ? 1 : 0;
+    break;
+  }
+
+  case hypercall_type_t::call_guest_function: {
+    // rdx = target CR3
+    // r8 = function address
+    // r9 = arg1
+    // Stack: arg2, arg3, arg4
+    const cr3 guest_cr3 = arch::get_guest_cr3();
+    const cr3 slat_cr3 = slat::hyperv_cr3();
+
+    const std::uint64_t target_cr3 = trap_frame->rdx;
+    const std::uint64_t function_addr = trap_frame->r8;
+    const std::uint64_t arg1 = trap_frame->r9;
+
+    std::uint64_t arg2 = 0, arg3 = 0, arg4 = 0;
+
+    auto read_arg = [&](std::uint64_t offset) -> std::uint64_t {
+      std::uint64_t gpa = memory_manager::translate_guest_virtual_address(
+          guest_cr3, slat_cr3, {.address = trap_frame->rsp + offset});
+      if (gpa == 0)
+        return 0;
+      std::uint64_t size_left = 0;
+      std::uint64_t *mapped = static_cast<std::uint64_t *>(
+          memory_manager::map_guest_physical(slat_cr3, gpa, &size_left));
+      return (mapped && size_left >= 8) ? *mapped : 0;
+    };
+
+    arg2 = read_arg(0x28);
+    arg3 = read_arg(0x30);
+    arg4 = read_arg(0x38);
+
+    trap_frame->rax = code_execute::call_function(target_cr3, function_addr,
+                                                  arg1, arg2, arg3, arg4);
+    break;
+  }
+
+  case hypercall_type_t::find_code_cave: {
+    // rdx = target CR3
+    // r8 = module base
+    // r9 = module size
+    // Stack: required size
+    const cr3 guest_cr3 = arch::get_guest_cr3();
+    const cr3 slat_cr3 = slat::hyperv_cr3();
+
+    const std::uint64_t target_cr3 = trap_frame->rdx;
+    const std::uint64_t module_base = trap_frame->r8;
+    const std::uint64_t module_size = trap_frame->r9;
+
+    std::uint64_t required_size = 64;
+    std::uint64_t stack_gpa = memory_manager::translate_guest_virtual_address(
+        guest_cr3, slat_cr3, {.address = trap_frame->rsp + 0x28});
+    if (stack_gpa != 0) {
+      std::uint64_t size_left = 0;
+      std::uint64_t *mapped = static_cast<std::uint64_t *>(
+          memory_manager::map_guest_physical(slat_cr3, stack_gpa, &size_left));
+      if (mapped && size_left >= 8)
+        required_size = *mapped;
+    }
+
+    trap_frame->rax = code_execute::find_code_cave(target_cr3, module_base,
+                                                   module_size, required_size);
+    break;
+  }
+
+  case hypercall_type_t::get_execution_result: {
+    // Check if execution complete and get result
+    if (code_execute::is_complete()) {
+      trap_frame->rax = code_execute::get_result();
+      trap_frame->rdx = 1; // Flag: complete
+    } else {
+      trap_frame->rax = 0;
+      trap_frame->rdx = 0; // Flag: not complete
+    }
     break;
   }
 
