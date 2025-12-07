@@ -282,7 +282,7 @@ std::uint64_t resolve_syscalls_to_exports(sys::kernel_module_t &ntoskrnl) {
     ntoskrnl.exports["ntoskrnl.exe!" + name] = kernel_address;
 
     // Also add Zw* variant (they point to same address)
-    if (name.starts_with("Nt")) {
+    if (name.size() >= 2 && name.compare(0, 2, "Nt") == 0) {
       std::string zw_name = "Zw" + name.substr(2);
       ntoskrnl.exports[zw_name] = kernel_address;
       ntoskrnl.exports["ntoskrnl.exe!" + zw_name] = kernel_address;
@@ -544,6 +544,14 @@ std::uint8_t parse_ntoskrnl() {
     std::println("unable to locate kernel hook holder");
 
     return 0;
+  }
+
+  // Resolve syscall addresses using hypervisor (invisible to PG)
+  sys::kernel_module_t &ntoskrnl = sys::kernel::modules_list["ntoskrnl.exe"];
+  std::uint64_t syscalls_resolved = resolve_syscalls_to_exports(ntoskrnl);
+  if (syscalls_resolved > 0) {
+    std::println("[+] Resolved {} syscall addresses (Nt*/Zw* functions)",
+                 syscalls_resolved);
   }
 
   return 1;
