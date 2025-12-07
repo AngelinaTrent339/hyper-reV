@@ -21,13 +21,13 @@
 ; RCX = dest, RDX = val, R8 = count
 ; Returns dest in RAX
 	memset PROC
+		mov r9, rcx         ; save original dest in r9 (non-volatile scratch)
 		push rdi
-		mov rdi, rcx        ; dest
-		mov rax, rdx        ; val (only low byte used)
-		mov rcx, r8         ; count
-		rep stosb           ; fill memory
-		mov rax, rdi        ; return original dest
-		sub rax, r8         ; adjust back to start
+		mov rdi, rcx        ; dest for stosb
+		mov rax, rdx        ; val (only AL is used by stosb)
+		mov rcx, r8         ; count for rep
+		rep stosb           ; fill memory (modifies RDI, RCX)
+		mov rax, r9         ; return original dest
 		pop rdi
 		ret
 	memset ENDP
