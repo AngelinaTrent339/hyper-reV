@@ -1,596 +1,1034 @@
 #include "commands.h"
-#include <CLI/CLI.hpp>
-#include <hypercall/hypercall_def.h>
 #include "../hook/hook.h"
 #include "../hypercall/hypercall.h"
 #include "../system/system.h"
+#include "../util/console.h"
+#include "../util/disasm.h"
+#include <CLI/CLI.hpp>
+#include <hypercall/hypercall_def.h>
 
-#include <print>
+
 #include <array>
+#include <chrono>
+#include <format>
+#include <print>
+
 
 #define d_invoke_command_processor(command) process_##command(##command)
-#define d_initial_process_command(command) if (*##command) d_invoke_command_processor(command)
-#define d_process_command(command) else if (*##command) d_invoke_command_processor(command)
+#define d_initial_process_command(command)                                     \
+  if (*##command)                                                              \
+  d_invoke_command_processor(command)
+#define d_process_command(command)                                             \
+  else if (*##command) d_invoke_command_processor(command)
 
 template <class t>
-t get_command_option(CLI::App* app, std::string option_name)
-{
-	auto option = app->get_option(option_name);
+t get_command_option(CLI::App *app, std::string option_name) {
+  auto option = app->get_option(option_name);
 
-	return option->empty() == false ? option->as<t>() : t{};
+  return option->empty() == false ? option->as<t>() : t{};
 }
 
-CLI::Option* add_command_option(CLI::App* app, std::string option_name)
-{
-	return app->add_option(option_name);
+CLI::Option *add_command_option(CLI::App *app, std::string option_name) {
+  return app->add_option(option_name);
 }
 
-CLI::Option* add_transformed_command_option(CLI::App* app, std::string option_name, CLI::Transformer& transformer)
-{
-	CLI::Option* option = add_command_option(app, option_name);
+CLI::Option *add_transformed_command_option(CLI::App *app,
+                                            std::string option_name,
+                                            CLI::Transformer &transformer) {
+  CLI::Option *option = add_command_option(app, option_name);
 
-	return option->transform(transformer);
+  return option->transform(transformer);
 }
 
-std::uint8_t get_command_flag(CLI::App* app, std::string flag_name)
-{
-	auto option = app->get_option(flag_name);
+std::uint8_t get_command_flag(CLI::App *app, std::string flag_name) {
+  auto option = app->get_option(flag_name);
 
-	return !option->empty();
+  return !option->empty();
 }
 
-CLI::Option* add_command_flag(CLI::App* app, std::string flag_name)
-{
-	return app->add_flag(flag_name);
+CLI::Option *add_command_flag(CLI::App *app, std::string flag_name) {
+  return app->add_flag(flag_name);
 }
 
-CLI::App* init_rgpm(CLI::App& app, CLI::Transformer& aliases_transformer)
-{
-	CLI::App* rgpm = app.add_subcommand("rgpm", "reads memory from a given guest physical address")->ignore_case();
+// ============================================================================
+// STATUS / INFO COMMANDS
+// ============================================================================
 
-	add_transformed_command_option(rgpm, "physical_address", aliases_transformer)->required();
-	add_command_option(rgpm, "size")->check(CLI::Range(0, 8))->required();
-
-	return rgpm;
+CLI::App *init_status(CLI::App &app) {
+  CLI::App *status =
+      app.add_subcommand("status", "show current hypervisor and session status")
+          ->ignore_case();
+  app.add_subcommand("info", "alias for status")
+      ->ignore_case()
+      ->group("")
+      ->callback([status]() {});
+  return status;
 }
 
-void process_rgpm(CLI::App* rgpm)
-{
-	const std::uint64_t guest_physical_address = get_command_option<std::uint64_t>(rgpm, "physical_address");
-	const std::uint64_t size = get_command_option<std::uint64_t>(rgpm, "size");
+void process_status(CLI::App *status) {
+  console::separator("Session Status");
 
-	std::uint64_t value = 0;
+  console::print_value("CR3", sys::current_cr3);
+  console::print_value("Modules Loaded", sys::kernel::modules_list.size());
+  console::print_value("Detour Base", hook::kernel_detour_holder_base);
 
-	const std::uint64_t bytes_read = hypercall::read_guest_physical_memory(&value, guest_physical_address, size);
+  std::uint64_t heap_pages = hypercall::get_heap_free_page_count();
+  console::print_value("Heap Free Pages", heap_pages);
+  console::print_value("Heap Free Memory", heap_pages * 0x1000);
 
-	if (bytes_read == size)
-	{
-		std::println("value: 0x{:x}", value);
-	}
-	else
-	{
-		std::println("failed to read");
-	}
+  console::separator();
 }
 
-CLI::App* init_wgpm(CLI::App& app, CLI::Transformer& aliases_transformer)
-{
-	CLI::App* wgpm = app.add_subcommand("wgpm", "writes memory to a given guest physical address")->ignore_case();
-
-	add_transformed_command_option(wgpm, "physical_address", aliases_transformer)->required();
-	add_command_option(wgpm, "value")->required();
-	add_command_option(wgpm, "size")->check(CLI::Range(0, 8))->required();
-
-	return wgpm;
+CLI::App *init_help_cmd(CLI::App &app) {
+  CLI::App *help_cmd =
+      app.add_subcommand("?", "quick command reference")->ignore_case();
+  return help_cmd;
 }
 
-void process_wgpm(CLI::App* wgpm)
-{
-	const std::uint64_t guest_physical_address = get_command_option<std::uint64_t>(wgpm, "physical_address");
-	const std::uint64_t size = get_command_option<std::uint64_t>(wgpm, "size");
+void process_help_cmd(CLI::App *help_cmd) {
+  std::println("\n{}Memory Commands:{}", console::color::bold,
+               console::color::reset);
+  std::println(
+      "  {}read{}    / {}rgpm{}   <addr> <size>      - read physical memory",
+      console::color::green, console::color::reset, console::color::dim,
+      console::color::reset);
+  std::println(
+      "  {}write{}   / {}wgpm{}   <addr> <val> <sz>  - write physical memory",
+      console::color::green, console::color::reset, console::color::dim,
+      console::color::reset);
+  std::println(
+      "  {}vread{}   / {}rgvm{}   <addr> <cr3> <sz>  - read virtual memory",
+      console::color::green, console::color::reset, console::color::dim,
+      console::color::reset);
+  std::println(
+      "  {}vwrite{}  / {}wgvm{}   <addr> <cr3> <v> <sz> - write virtual memory",
+      console::color::green, console::color::reset, console::color::dim,
+      console::color::reset);
+  std::println(
+      "  {}dump{}    / {}db{}     <addr> <size> [--cr3]  - hex dump memory",
+      console::color::green, console::color::reset, console::color::dim,
+      console::color::reset);
+  std::println(
+      "  {}disasm{} / {}u{}      <addr> <size> [--cr3]  - disassemble code",
+      console::color::green, console::color::reset, console::color::dim,
+      console::color::reset);
+  std::println(
+      "  {}translate{} / {}gvat{} <vaddr> <cr3>    - VA to PA translation",
+      console::color::green, console::color::reset, console::color::dim,
+      console::color::reset);
 
-	std::uint64_t value = get_command_option<std::uint64_t>(wgpm, "value");
+  std::println("\n{}Hooking Commands:{}", console::color::bold,
+               console::color::reset);
+  std::println(
+      "  {}hook{}    / {}akh{}    <addr> --asmbytes  - add kernel hook",
+      console::color::yellow, console::color::reset, console::color::dim,
+      console::color::reset);
+  std::println(
+      "  {}unhook{} / {}rkh{}    <addr>             - remove kernel hook",
+      console::color::yellow, console::color::reset, console::color::dim,
+      console::color::reset);
+  std::println(
+      "  {}hide{}   / {}hgpp{}   <phys_addr>        - hide physical page",
+      console::color::yellow, console::color::reset, console::color::dim,
+      console::color::reset);
+  std::println(
+      "  {}logs{}    / {}fl{}                       - flush trap frame logs",
+      console::color::yellow, console::color::reset, console::color::dim,
+      console::color::reset);
 
-	const std::uint64_t bytes_written = hypercall::write_guest_physical_memory(&value, guest_physical_address, size);
+  std::println("\n{}Analysis Commands:{}", console::color::bold,
+               console::color::reset);
+  std::println(
+      "  {}modules{} / {}lkm{}                      - list kernel modules",
+      console::color::cyan, console::color::reset, console::color::dim,
+      console::color::reset);
+  std::println(
+      "  {}exports{} / {}kme{}   <module>           - list module exports",
+      console::color::cyan, console::color::reset, console::color::dim,
+      console::color::reset);
+  std::println(
+      "  {}dumpmod{} / {}dkm{}   <mod> <outdir>     - dump module to disk",
+      console::color::cyan, console::color::reset, console::color::dim,
+      console::color::reset);
+  std::println(
+      "  {}resolve{} / {}gva{}   <alias>            - resolve alias to address",
+      console::color::cyan, console::color::reset, console::color::dim,
+      console::color::reset);
 
-	if (bytes_written == size)
-	{
-		std::println("success in write");
-	}
-	else
-	{
-		std::println("failed to write");
-	}
+  std::println("\n{}Session Commands:{}", console::color::bold,
+               console::color::reset);
+  std::println(
+      "  {}status{} / {}info{}                      - show session info",
+      console::color::magenta, console::color::reset, console::color::dim,
+      console::color::reset);
+  std::println(
+      "  {}heap{}    / {}hfpc{}                      - heap free page count",
+      console::color::magenta, console::color::reset, console::color::dim,
+      console::color::reset);
+  std::println("  {}?{}                                    - this help",
+               console::color::magenta, console::color::reset);
+  std::println("  {}exit{}                                 - exit session\n",
+               console::color::magenta, console::color::reset);
+
+  std::println("{}Tip:{} Use module names/exports as aliases: e.g., "
+               "'ntoskrnl.exe!KeQueryPerformanceCounter'",
+               console::color::dim, console::color::reset);
+  std::println("{}Tip:{} 'current_cr3' is always the current process CR3\n",
+               console::color::dim, console::color::reset);
 }
 
-CLI::App* init_cgpm(CLI::App& app, CLI::Transformer& aliases_transformer)
-{
-	CLI::App* cgpm = app.add_subcommand("cgpm", "copies memory from a given source to a destination (guest physical addresses)")->ignore_case();
+// ============================================================================
+// MEMORY READ/WRITE COMMANDS
+// ============================================================================
 
-	add_transformed_command_option(cgpm, "destination_physical_address", aliases_transformer)->required();
-	add_transformed_command_option(cgpm, "source_physical_address", aliases_transformer)->required();
-	add_command_option(cgpm, "size")->required();
+CLI::App *init_rgpm(CLI::App &app, CLI::Transformer &aliases_transformer) {
+  CLI::App *rgpm =
+      app.add_subcommand("rgpm", "read guest physical memory")->ignore_case();
+  app.add_subcommand("read", "read guest physical memory (alias)")
+      ->ignore_case()
+      ->group("");
 
-	return cgpm;
+  add_transformed_command_option(rgpm, "physical_address", aliases_transformer)
+      ->required();
+  add_command_option(rgpm, "size")->check(CLI::Range(1, 8))->required();
+
+  return rgpm;
 }
 
-void process_cgpm(CLI::App* cgpm)
-{
-	const std::uint64_t guest_destination_physical_address = get_command_option<std::uint64_t>(cgpm, "destination_physical_address");
-	const std::uint64_t guest_source_physical_address = get_command_option<std::uint64_t>(cgpm, "source_physical_address");
-	const std::uint64_t size = get_command_option<std::uint64_t>(cgpm, "size");
+void process_rgpm(CLI::App *rgpm) {
+  const std::uint64_t guest_physical_address =
+      get_command_option<std::uint64_t>(rgpm, "physical_address");
+  const std::uint64_t size = get_command_option<std::uint64_t>(rgpm, "size");
 
-	std::vector<std::uint8_t> buffer(size);
+  std::uint64_t value = 0;
 
-	const std::uint64_t bytes_read = hypercall::read_guest_physical_memory(buffer.data(), guest_source_physical_address, size);
-	const std::uint64_t bytes_written = hypercall::write_guest_physical_memory(buffer.data(), guest_destination_physical_address, size);
+  const std::uint64_t bytes_read = hypercall::read_guest_physical_memory(
+      &value, guest_physical_address, size);
 
-	if ((bytes_read == size) && (bytes_written == size))
-	{
-		std::println("success in copy");
-	}
-	else
-	{
-		std::println("failed to copy");
-	}
+  if (bytes_read == size) {
+    console::print_value(std::format("@{:X}", guest_physical_address), value);
+  } else {
+    console::error(
+        "Failed to read physical memory",
+        std::format("address=0x{:X}, requested={} bytes, read={} bytes",
+                    guest_physical_address, size, bytes_read));
+  }
 }
 
-CLI::App* init_gvat(CLI::App& app, CLI::Transformer& aliases_transformer)
-{
-	CLI::App* gvat = app.add_subcommand("gvat", "translates a guest virtual address to its corresponding guest physical address, with the given guest cr3 value")->ignore_case();
+CLI::App *init_wgpm(CLI::App &app, CLI::Transformer &aliases_transformer) {
+  CLI::App *wgpm =
+      app.add_subcommand("wgpm", "write guest physical memory")->ignore_case();
+  app.add_subcommand("write", "write guest physical memory (alias)")
+      ->ignore_case()
+      ->group("");
 
-	add_transformed_command_option(gvat, "virtual_address", aliases_transformer)->required();
-	add_transformed_command_option(gvat, "cr3", aliases_transformer)->required();
+  add_transformed_command_option(wgpm, "physical_address", aliases_transformer)
+      ->required();
+  add_command_option(wgpm, "value")->required();
+  add_command_option(wgpm, "size")->check(CLI::Range(1, 8))->required();
 
-	return gvat;
+  return wgpm;
 }
 
-void process_gvat(CLI::App* gvat)
-{
-	const std::uint64_t virtual_address = get_command_option<std::uint64_t>(gvat, "virtual_address");
-	const std::uint64_t cr3 = get_command_option<std::uint64_t>(gvat, "cr3");
+void process_wgpm(CLI::App *wgpm) {
+  const std::uint64_t guest_physical_address =
+      get_command_option<std::uint64_t>(wgpm, "physical_address");
+  const std::uint64_t size = get_command_option<std::uint64_t>(wgpm, "size");
+  std::uint64_t value = get_command_option<std::uint64_t>(wgpm, "value");
 
-	const std::uint64_t physical_address = hypercall::translate_guest_virtual_address(virtual_address, cr3);
+  const std::uint64_t bytes_written = hypercall::write_guest_physical_memory(
+      &value, guest_physical_address, size);
 
-	std::println("physical address: 0x{:x}", physical_address);
+  if (bytes_written == size) {
+    console::success(std::format("Wrote 0x{:X} ({} bytes) to 0x{:X}", value,
+                                 size, guest_physical_address));
+  } else {
+    console::error(
+        "Failed to write physical memory",
+        std::format("address=0x{:X}, requested={} bytes, written={} bytes",
+                    guest_physical_address, size, bytes_written));
+  }
 }
 
-CLI::App* init_rgvm(CLI::App& app, CLI::Transformer& aliases_transformer)
-{
-	CLI::App* rgvm = app.add_subcommand("rgvm", "reads memory from a given guest virtual address (when given the corresponding guest cr3 value)")->ignore_case();
+CLI::App *init_cgpm(CLI::App &app, CLI::Transformer &aliases_transformer) {
+  CLI::App *cgpm =
+      app.add_subcommand("cgpm", "copy guest physical memory")->ignore_case();
+  app.add_subcommand("copy", "copy guest physical memory (alias)")
+      ->ignore_case()
+      ->group("");
 
-	add_transformed_command_option(rgvm, "virtual_address", aliases_transformer)->required();
-	add_transformed_command_option(rgvm, "cr3", aliases_transformer)->required();
-	add_command_option(rgvm, "size")->check(CLI::Range(0, 8))->required();
+  add_transformed_command_option(cgpm, "destination_physical_address",
+                                 aliases_transformer)
+      ->required();
+  add_transformed_command_option(cgpm, "source_physical_address",
+                                 aliases_transformer)
+      ->required();
+  add_command_option(cgpm, "size")->required();
 
-	return rgvm;
+  return cgpm;
 }
 
-void process_rgvm(CLI::App* rgvm)
-{
-	const std::uint64_t guest_virtual_address = get_command_option<std::uint64_t>(rgvm, "virtual_address");
-	const std::uint64_t cr3 = get_command_option<std::uint64_t>(rgvm, "cr3");
-	const std::uint64_t size = get_command_option<std::uint64_t>(rgvm, "size");
+void process_cgpm(CLI::App *cgpm) {
+  const std::uint64_t guest_destination_physical_address =
+      get_command_option<std::uint64_t>(cgpm, "destination_physical_address");
+  const std::uint64_t guest_source_physical_address =
+      get_command_option<std::uint64_t>(cgpm, "source_physical_address");
+  const std::uint64_t size = get_command_option<std::uint64_t>(cgpm, "size");
 
-	std::uint64_t value = 0;
+  std::vector<std::uint8_t> buffer(size);
 
-	const std::uint64_t bytes_read = hypercall::read_guest_virtual_memory(&value, guest_virtual_address, cr3, size);
+  const std::uint64_t bytes_read = hypercall::read_guest_physical_memory(
+      buffer.data(), guest_source_physical_address, size);
 
-	if (bytes_read == size)
-	{
-		std::println("value: 0x{:x}", value);
-	}
-	else
-	{
-		std::println("failed to read");
-	}
+  if (bytes_read != size) {
+    console::error("Failed to read source memory",
+                   std::format("source=0x{:X}, read={}/{} bytes",
+                               guest_source_physical_address, bytes_read,
+                               size));
+    return;
+  }
+
+  const std::uint64_t bytes_written = hypercall::write_guest_physical_memory(
+      buffer.data(), guest_destination_physical_address, size);
+
+  if (bytes_written == size) {
+    console::success(std::format("Copied {} bytes: 0x{:X} -> 0x{:X}", size,
+                                 guest_source_physical_address,
+                                 guest_destination_physical_address));
+  } else {
+    console::error("Failed to write destination memory",
+                   std::format("dest=0x{:X}, written={}/{} bytes",
+                               guest_destination_physical_address,
+                               bytes_written, size));
+  }
 }
 
-CLI::App* init_wgvm(CLI::App& app, CLI::Transformer& aliases_transformer)
-{
-	CLI::App* wgvm = app.add_subcommand("wgvm", "writes memory from a given guest virtual address (when given the corresponding guest cr3 value)")->ignore_case();
+CLI::App *init_gvat(CLI::App &app, CLI::Transformer &aliases_transformer) {
+  CLI::App *gvat =
+      app.add_subcommand("gvat", "translate virtual address to physical")
+          ->ignore_case();
+  app.add_subcommand("translate",
+                     "translate virtual address to physical (alias)")
+      ->ignore_case()
+      ->group("");
 
-	add_transformed_command_option(wgvm, "virtual_address", aliases_transformer)->required();
-	add_transformed_command_option(wgvm, "cr3", aliases_transformer)->required();
-	add_command_option(wgvm, "value")->required();
-	add_command_option(wgvm, "size")->check(CLI::Range(0, 8))->required();
+  add_transformed_command_option(gvat, "virtual_address", aliases_transformer)
+      ->required();
+  add_transformed_command_option(gvat, "cr3", aliases_transformer)->required();
 
-	return wgvm;
+  return gvat;
 }
 
-void process_wgvm(CLI::App* wgvm)
-{
-	const std::uint64_t guest_virtual_address = get_command_option<std::uint64_t>(wgvm, "virtual_address");
-	const std::uint64_t cr3 = get_command_option<std::uint64_t>(wgvm, "cr3");
-	const std::uint64_t size = get_command_option<std::uint64_t>(wgvm, "size");
+void process_gvat(CLI::App *gvat) {
+  const std::uint64_t virtual_address =
+      get_command_option<std::uint64_t>(gvat, "virtual_address");
+  const std::uint64_t cr3 = get_command_option<std::uint64_t>(gvat, "cr3");
 
-	std::uint64_t value = get_command_option<std::uint64_t>(wgvm, "value");
+  const std::uint64_t physical_address =
+      hypercall::translate_guest_virtual_address(virtual_address, cr3);
 
-	const std::uint64_t bytes_written = hypercall::write_guest_virtual_memory(&value, guest_virtual_address, cr3, size);
-
-	if (bytes_written == size)
-	{
-		std::println("success in write at given address");
-	}
-	else
-	{
-		std::println("failed to write at given address");
-	}
+  if (physical_address != 0) {
+    console::print_value("Virtual", virtual_address);
+    console::print_value("Physical", physical_address);
+    console::print_value("Page Offset", virtual_address & 0xFFF);
+  } else {
+    console::error(
+        "Translation failed",
+        std::format("VA=0x{:X} with CR3=0x{:X} - page may not be present",
+                    virtual_address, cr3));
+  }
 }
 
-CLI::App* init_cgvm(CLI::App& app, CLI::Transformer& aliases_transformer)
-{
-	CLI::App* cgvm = app.add_subcommand("cgvm", "copies memory from a given source to a destination (guest virtual addresses) (when given the corresponding guest cr3 values)")->ignore_case();
+CLI::App *init_rgvm(CLI::App &app, CLI::Transformer &aliases_transformer) {
+  CLI::App *rgvm =
+      app.add_subcommand("rgvm", "read guest virtual memory")->ignore_case();
+  app.add_subcommand("vread", "read guest virtual memory (alias)")
+      ->ignore_case()
+      ->group("");
 
-	add_transformed_command_option(cgvm, "destination_virtual_address", aliases_transformer)->required();
-	add_transformed_command_option(cgvm, "destination_cr3", aliases_transformer)->required();
-	add_transformed_command_option(cgvm, "source_virtual_address", aliases_transformer)->required();
-	add_transformed_command_option(cgvm, "source_cr3", aliases_transformer)->required();
-	add_command_option(cgvm, "size")->required();
+  add_transformed_command_option(rgvm, "virtual_address", aliases_transformer)
+      ->required();
+  add_transformed_command_option(rgvm, "cr3", aliases_transformer)->required();
+  add_command_option(rgvm, "size")->check(CLI::Range(1, 8))->required();
 
-	return cgvm;
+  return rgvm;
 }
 
-void process_cgvm(CLI::App* wgvm)
-{
-	const std::uint64_t guest_destination_virtual_address = get_command_option<std::uint64_t>(wgvm, "destination_virtual_address");
-	const std::uint64_t guest_destination_cr3 = get_command_option<std::uint64_t>(wgvm, "destination_cr3");
+void process_rgvm(CLI::App *rgvm) {
+  const std::uint64_t guest_virtual_address =
+      get_command_option<std::uint64_t>(rgvm, "virtual_address");
+  const std::uint64_t cr3 = get_command_option<std::uint64_t>(rgvm, "cr3");
+  const std::uint64_t size = get_command_option<std::uint64_t>(rgvm, "size");
 
-	const std::uint64_t guest_source_virtual_address = get_command_option<std::uint64_t>(wgvm, "source_virtual_address");
-	const std::uint64_t guest_source_cr3 = get_command_option<std::uint64_t>(wgvm, "source_cr3");
+  std::uint64_t value = 0;
 
-	const std::uint64_t size = get_command_option<std::uint64_t>(wgvm, "size");
+  const std::uint64_t bytes_read = hypercall::read_guest_virtual_memory(
+      &value, guest_virtual_address, cr3, size);
 
-	std::vector<std::uint8_t> buffer(size);
-
-	const std::uint64_t bytes_read = hypercall::read_guest_virtual_memory(buffer.data(), guest_source_virtual_address, guest_source_cr3, size);
-	const std::uint64_t bytes_written = hypercall::write_guest_virtual_memory(buffer.data(), guest_destination_virtual_address, guest_destination_cr3, size);
-
-	if ((bytes_read == size) && (bytes_written == size))
-	{
-		std::println("success in copy");
-	}
-	else
-	{
-		std::println("failed to copy");
-	}
+  if (bytes_read == size) {
+    console::print_value(std::format("@{:X}", guest_virtual_address), value);
+  } else {
+    console::error(
+        "Failed to read virtual memory",
+        std::format("VA=0x{:X}, CR3=0x{:X}, requested={}, read={} bytes",
+                    guest_virtual_address, cr3, size, bytes_read));
+  }
 }
 
-CLI::App* init_akh(CLI::App& app, CLI::Transformer& aliases_transformer)
-{
-	CLI::App* akh = app.add_subcommand("akh", "add a hook on specified kernel code (given the guest virtual address) (asmbytes in form: 0xE8 0x12 0x23 0x34 0x45)")->ignore_case();
+CLI::App *init_wgvm(CLI::App &app, CLI::Transformer &aliases_transformer) {
+  CLI::App *wgvm =
+      app.add_subcommand("wgvm", "write guest virtual memory")->ignore_case();
+  app.add_subcommand("vwrite", "write guest virtual memory (alias)")
+      ->ignore_case()
+      ->group("");
 
-	add_transformed_command_option(akh, "virtual_address", aliases_transformer)->required();
-	add_command_option(akh, "--asmbytes")->multi_option_policy(CLI::MultiOptionPolicy::TakeAll)->expected(-1);
-	add_command_option(akh, "--post_original_asmbytes")->multi_option_policy(CLI::MultiOptionPolicy::TakeAll)->expected(-1);
-	add_command_flag(akh, "--monitor");
+  add_transformed_command_option(wgvm, "virtual_address", aliases_transformer)
+      ->required();
+  add_transformed_command_option(wgvm, "cr3", aliases_transformer)->required();
+  add_command_option(wgvm, "value")->required();
+  add_command_option(wgvm, "size")->check(CLI::Range(1, 8))->required();
 
-	return akh;
+  return wgvm;
 }
 
-void process_akh(CLI::App* akh)
-{
-	const std::uint64_t virtual_address = get_command_option<std::uint64_t>(akh, "virtual_address");
+void process_wgvm(CLI::App *wgvm) {
+  const std::uint64_t guest_virtual_address =
+      get_command_option<std::uint64_t>(wgvm, "virtual_address");
+  const std::uint64_t cr3 = get_command_option<std::uint64_t>(wgvm, "cr3");
+  const std::uint64_t size = get_command_option<std::uint64_t>(wgvm, "size");
+  std::uint64_t value = get_command_option<std::uint64_t>(wgvm, "value");
 
-	std::vector<uint8_t> asm_bytes = get_command_option<std::vector<uint8_t>>(akh, "--asmbytes");
-	const std::vector<uint8_t> post_original_asm_bytes = get_command_option<std::vector<uint8_t>>(akh, "--post_original_asmbytes");
+  const std::uint64_t bytes_written = hypercall::write_guest_virtual_memory(
+      &value, guest_virtual_address, cr3, size);
 
-	const std::uint8_t monitor = get_command_flag(akh, "--monitor");
-
-	if (monitor == 1)
-	{
-		std::array<std::uint8_t, 9> monitor_bytes = {
-			0x51, // push rcx
-			0xB9, 0x00, 0x00, 0x00, 0x00, // mov ecx, 0
-			0x0F, 0xA2, // cpuid
-			0x59 // pop rcx
-		};
-
-		hypercall_info_t call_info = { };
-
-		call_info.primary_key = hypercall_primary_key;
-		call_info.secondary_key = hypercall_secondary_key;
-		call_info.call_type = hypercall_type_t::log_current_state;
-
-		*reinterpret_cast<std::uint32_t*>(&monitor_bytes[2]) = static_cast<std::uint32_t>(call_info.value);
-
-		asm_bytes.insert(asm_bytes.end(), monitor_bytes.begin(), monitor_bytes.end());
-	}
-
-	const std::uint8_t hook_status = hook::add_kernel_hook(virtual_address, asm_bytes, post_original_asm_bytes);
-
-	if (hook_status == 1)
-	{
-		std::println("success in hook");
-	}
-	else
-	{
-		std::println("failed to hook");
-	}
+  if (bytes_written == size) {
+    console::success(std::format("Wrote 0x{:X} ({} bytes) to VA 0x{:X}", value,
+                                 size, guest_virtual_address));
+  } else {
+    console::error(
+        "Failed to write virtual memory",
+        std::format("VA=0x{:X}, CR3=0x{:X}, requested={}, written={} bytes",
+                    guest_virtual_address, cr3, size, bytes_written));
+  }
 }
 
-CLI::App* init_rkh(CLI::App& app, CLI::Transformer& aliases_transformer)
-{
-	CLI::App* rkh = app.add_subcommand("rkh", "remove a previously placed hook on specified kernel code (given the guest virtual address)")->ignore_case();
+CLI::App *init_cgvm(CLI::App &app, CLI::Transformer &aliases_transformer) {
+  CLI::App *cgvm =
+      app.add_subcommand("cgvm", "copy guest virtual memory")->ignore_case();
+  app.add_subcommand("vcopy", "copy guest virtual memory (alias)")
+      ->ignore_case()
+      ->group("");
 
-	add_transformed_command_option(rkh, "virtual_address", aliases_transformer)->required();
+  add_transformed_command_option(cgvm, "destination_virtual_address",
+                                 aliases_transformer)
+      ->required();
+  add_transformed_command_option(cgvm, "destination_cr3", aliases_transformer)
+      ->required();
+  add_transformed_command_option(cgvm, "source_virtual_address",
+                                 aliases_transformer)
+      ->required();
+  add_transformed_command_option(cgvm, "source_cr3", aliases_transformer)
+      ->required();
+  add_command_option(cgvm, "size")->required();
 
-	return rkh;
+  return cgvm;
 }
 
-void process_rkh(CLI::App* rkh)
-{
-	const std::uint64_t virtual_address = get_command_option<std::uint64_t>(rkh, "virtual_address");
+void process_cgvm(CLI::App *cgvm) {
+  const std::uint64_t guest_destination_virtual_address =
+      get_command_option<std::uint64_t>(cgvm, "destination_virtual_address");
+  const std::uint64_t guest_destination_cr3 =
+      get_command_option<std::uint64_t>(cgvm, "destination_cr3");
+  const std::uint64_t guest_source_virtual_address =
+      get_command_option<std::uint64_t>(cgvm, "source_virtual_address");
+  const std::uint64_t guest_source_cr3 =
+      get_command_option<std::uint64_t>(cgvm, "source_cr3");
+  const std::uint64_t size = get_command_option<std::uint64_t>(cgvm, "size");
 
-	const std::uint8_t hook_removal_status = hook::remove_kernel_hook(virtual_address, 1);
+  std::vector<std::uint8_t> buffer(size);
 
-	if (hook_removal_status == 1)
-	{
-		std::println("success in hook removal");
-	}
-	else
-	{
-		std::println("failed to remove hook");
-	}
+  const std::uint64_t bytes_read = hypercall::read_guest_virtual_memory(
+      buffer.data(), guest_source_virtual_address, guest_source_cr3, size);
+
+  if (bytes_read != size) {
+    console::error("Failed to read source virtual memory",
+                   std::format("source VA=0x{:X}, read={}/{} bytes",
+                               guest_source_virtual_address, bytes_read, size));
+    return;
+  }
+
+  const std::uint64_t bytes_written = hypercall::write_guest_virtual_memory(
+      buffer.data(), guest_destination_virtual_address, guest_destination_cr3,
+      size);
+
+  if (bytes_written == size) {
+    console::success(std::format("Copied {} bytes: VA 0x{:X} -> VA 0x{:X}",
+                                 size, guest_source_virtual_address,
+                                 guest_destination_virtual_address));
+  } else {
+    console::error("Failed to write destination virtual memory",
+                   std::format("dest VA=0x{:X}, written={}/{} bytes",
+                               guest_destination_virtual_address, bytes_written,
+                               size));
+  }
 }
 
-CLI::App* init_hgpp(CLI::App& app, CLI::Transformer& aliases_transformer)
-{
-	CLI::App* hgpp = app.add_subcommand("hgpp", "hide a physical page's real contents from the guest")->ignore_case();
+// ============================================================================
+// HEX DUMP AND DISASSEMBLY COMMANDS
+// ============================================================================
 
-	add_transformed_command_option(hgpp, "physical_address", aliases_transformer)->required();
+CLI::App *init_dump(CLI::App &app, CLI::Transformer &aliases_transformer) {
+  CLI::App *dump = app.add_subcommand("dump", "hex dump memory")->ignore_case();
+  app.add_subcommand("db", "hex dump memory (alias)")->ignore_case()->group("");
 
-	return hgpp;
+  add_transformed_command_option(dump, "address", aliases_transformer)
+      ->required();
+  add_command_option(dump, "size")->required();
+  add_transformed_command_option(
+      dump, "--cr3", aliases_transformer); // optional, if provided = virtual
+
+  return dump;
 }
 
-void process_hgpp(CLI::App* hgpp)
-{
-	const std::uint64_t physical_address = get_command_option<std::uint64_t>(hgpp, "physical_address");
+void process_dump(CLI::App *dump) {
+  const std::uint64_t address =
+      get_command_option<std::uint64_t>(dump, "address");
+  const std::uint64_t size = get_command_option<std::uint64_t>(dump, "size");
+  const std::uint64_t cr3 = get_command_option<std::uint64_t>(dump, "--cr3");
 
-	const std::uint64_t hide_status = hypercall::hide_guest_physical_page(physical_address);
+  if (size > 0x10000) {
+    console::error("Size too large", "maximum 64KB per dump");
+    return;
+  }
 
-	if (hide_status == 1)
-	{
-		std::println("success in hiding page");
-	}
-	else
-	{
-		std::println("failed to hide page");
-	}
+  std::vector<std::uint8_t> buffer(size);
+  std::uint64_t bytes_read = 0;
+
+  if (cr3 != 0) {
+    bytes_read =
+        hypercall::read_guest_virtual_memory(buffer.data(), address, cr3, size);
+    console::info(
+        std::format("Virtual memory dump @ 0x{:X} (CR3=0x{:X})", address, cr3));
+  } else {
+    bytes_read =
+        hypercall::read_guest_physical_memory(buffer.data(), address, size);
+    console::info(std::format("Physical memory dump @ 0x{:X}", address));
+  }
+
+  if (bytes_read == 0) {
+    console::error("Failed to read memory", "no bytes returned");
+    return;
+  }
+
+  if (bytes_read < size) {
+    console::warn(
+        std::format("Partial read: {} of {} bytes", bytes_read, size));
+  }
+
+  std::println("");
+  console::hexdump(buffer.data(), bytes_read, address);
+  std::println("");
 }
 
-CLI::App* init_fl(CLI::App& app)
-{
-	CLI::App* fl = app.add_subcommand("fl", "flush trap frame logs from hooks")->ignore_case();
+CLI::App *init_disasm(CLI::App &app, CLI::Transformer &aliases_transformer) {
+  CLI::App *dis =
+      app.add_subcommand("disasm", "disassemble code")->ignore_case();
+  app.add_subcommand("u", "disassemble code (alias)")->ignore_case()->group("");
 
-	return fl;
+  add_transformed_command_option(dis, "address", aliases_transformer)
+      ->required();
+  add_command_option(dis, "size")->required();
+  add_transformed_command_option(dis, "--cr3", aliases_transformer);
+
+  return dis;
 }
 
-void process_fl(CLI::App* fl)
-{
-	constexpr std::uint64_t log_count = 100;
-	constexpr std::uint64_t failed_log_count = -1;
+void process_disasm(CLI::App *dis) {
+  const std::uint64_t address =
+      get_command_option<std::uint64_t>(dis, "address");
+  const std::uint64_t size = get_command_option<std::uint64_t>(dis, "size");
+  const std::uint64_t cr3 = get_command_option<std::uint64_t>(dis, "--cr3");
 
-	std::vector<trap_frame_log_t> logs(log_count);
+  if (size > 0x1000) {
+    console::error("Size too large", "maximum 4KB per disassembly");
+    return;
+  }
 
-	const std::uint64_t logs_flushed = hypercall::flush_logs(logs);
+  std::vector<std::uint8_t> buffer(size);
+  std::uint64_t bytes_read = 0;
 
-	if (logs_flushed == failed_log_count)
-	{
-		std::println("failed to flush logs");
-	}
-	else if (logs_flushed == 0)
-	{
-		std::println("there are no logs to flush");
-	}
-	else
-	{
-		std::println("success in flushing logs ({}), outputting logs now:\n\n", logs_flushed);
+  if (cr3 != 0) {
+    bytes_read =
+        hypercall::read_guest_virtual_memory(buffer.data(), address, cr3, size);
+    console::info(
+        std::format("Disassembly @ VA 0x{:X} (CR3=0x{:X})", address, cr3));
+  } else {
+    bytes_read =
+        hypercall::read_guest_physical_memory(buffer.data(), address, size);
+    console::info(std::format("Disassembly @ PA 0x{:X}", address));
+  }
 
-		for (std::uint64_t i = 0; i < logs_flushed; i++)
-		{
-			const trap_frame_log_t& log = logs[i];
+  if (bytes_read == 0) {
+    console::error("Failed to read memory");
+    return;
+  }
 
-			if (log.rip == 0)
-			{
-				break;
-			}
-
-			std::println("{}. rip=0x{:X} rax=0x{:X} rcx=0x{:X}\nrdx=0x{:X} rbx=0x{:X} rsp=0x{:X} rbp=0x{:X}\nrsi=0x{:X} rdi=0x{:X} r8=0x{:X} r9=0x{:X}\nr10=0x{:X} r11=0x{:X} r12=0x{:X} r13=0x{:X} r14=0x{:X}\nr15=0x{:X} cr3=0x{:X}\n"
-				,i, log.rip, log.rax, log.rcx, log.rdx, log.rbx, log.rsp, log.rbp, log.rsi, log.rdi, log.r8, log.r9, log.r10, log.r11, log.r12, log.r13, log.r14, log.r15, log.cr3);
-
-			std::println("stack data:");
-			
-			for (const std::uint64_t stack_value : log.stack_data)
-			{
-				std::println("  0x{:X}", stack_value);
-			}
-
-			std::println();
-		}
-	}
+  std::println("");
+  disasm::print_disasm(buffer.data(), bytes_read, address);
+  std::println("");
 }
 
-CLI::App* init_hfpc(CLI::App& app)
-{
-	CLI::App* hfpc = app.add_subcommand("hfpc", "get hyperv-attachment's heap free page count")->ignore_case();
+// ============================================================================
+// HOOKING COMMANDS
+// ============================================================================
 
-	return hfpc;
+CLI::App *init_akh(CLI::App &app, CLI::Transformer &aliases_transformer) {
+  CLI::App *akh =
+      app.add_subcommand("akh",
+                         "add kernel hook (format: --asmbytes 0xE8 0x12 ...)")
+          ->ignore_case();
+  app.add_subcommand("hook", "add kernel hook (alias)")
+      ->ignore_case()
+      ->group("");
+
+  add_transformed_command_option(akh, "virtual_address", aliases_transformer)
+      ->required();
+  add_command_option(akh, "--asmbytes")
+      ->multi_option_policy(CLI::MultiOptionPolicy::TakeAll)
+      ->expected(-1);
+  add_command_option(akh, "--post_original_asmbytes")
+      ->multi_option_policy(CLI::MultiOptionPolicy::TakeAll)
+      ->expected(-1);
+  add_command_flag(akh, "--monitor");
+
+  return akh;
 }
 
-void process_hfpc(CLI::App* hfpc)
-{
-	const std::uint64_t heap_free_page_count = hypercall::get_heap_free_page_count();
+void process_akh(CLI::App *akh) {
+  const std::uint64_t virtual_address =
+      get_command_option<std::uint64_t>(akh, "virtual_address");
+  std::vector<uint8_t> asm_bytes =
+      get_command_option<std::vector<uint8_t>>(akh, "--asmbytes");
+  const std::vector<uint8_t> post_original_asm_bytes =
+      get_command_option<std::vector<uint8_t>>(akh, "--post_original_asmbytes");
+  const std::uint8_t monitor = get_command_flag(akh, "--monitor");
 
-	std::println("heap free page count: {}", heap_free_page_count);
+  if (monitor == 1) {
+    std::array<std::uint8_t, 9> monitor_bytes = {
+        0x51,                         // push rcx
+        0xB9, 0x00, 0x00, 0x00, 0x00, // mov ecx, 0
+        0x0F, 0xA2,                   // cpuid
+        0x59                          // pop rcx
+    };
+
+    hypercall_info_t call_info = {};
+    call_info.primary_key = hypercall_primary_key;
+    call_info.secondary_key = hypercall_secondary_key;
+    call_info.call_type = hypercall_type_t::log_current_state;
+    *reinterpret_cast<std::uint32_t *>(&monitor_bytes[2]) =
+        static_cast<std::uint32_t>(call_info.value);
+
+    asm_bytes.insert(asm_bytes.end(), monitor_bytes.begin(),
+                     monitor_bytes.end());
+  }
+
+  const std::uint8_t hook_status = hook::add_kernel_hook(
+      virtual_address, asm_bytes, post_original_asm_bytes);
+
+  if (hook_status == 1) {
+    console::success(std::format(
+        "Hook installed at 0x{:X} ({} bytes payload{})", virtual_address,
+        asm_bytes.size(), monitor ? " + monitor" : ""));
+  } else {
+    console::error("Failed to install hook",
+                   std::format("target=0x{:X}, payload size={} bytes",
+                               virtual_address, asm_bytes.size()));
+  }
 }
 
-CLI::App* init_lkm(CLI::App& app)
-{
-	CLI::App* lkm = app.add_subcommand("lkm", "print list of loaded kernel modules")->ignore_case();
+CLI::App *init_rkh(CLI::App &app, CLI::Transformer &aliases_transformer) {
+  CLI::App *rkh =
+      app.add_subcommand("rkh", "remove kernel hook")->ignore_case();
+  app.add_subcommand("unhook", "remove kernel hook (alias)")
+      ->ignore_case()
+      ->group("");
 
-	return lkm;
+  add_transformed_command_option(rkh, "virtual_address", aliases_transformer)
+      ->required();
+
+  return rkh;
 }
 
-void process_lkm(CLI::App* lkm)
-{
-	for (const auto& [module_name, module_info] : sys::kernel::modules_list)
-	{
-		std::println("'{}' has a base address of: 0x{:x}, and a size of: 0x{:X}", module_name, module_info.base_address, module_info.size);
-	}
+void process_rkh(CLI::App *rkh) {
+  const std::uint64_t virtual_address =
+      get_command_option<std::uint64_t>(rkh, "virtual_address");
+
+  const std::uint8_t hook_removal_status =
+      hook::remove_kernel_hook(virtual_address, 1);
+
+  if (hook_removal_status == 1) {
+    console::success(std::format("Hook removed from 0x{:X}", virtual_address));
+  } else {
+    console::error("Failed to remove hook",
+                   std::format("target=0x{:X}", virtual_address));
+  }
 }
 
-CLI::App* init_kme(CLI::App& app)
-{
-	CLI::App* kme = app.add_subcommand("kme", "list the exports of a loaded kernel module (when given the name)")->ignore_case();
+CLI::App *init_hgpp(CLI::App &app, CLI::Transformer &aliases_transformer) {
+  CLI::App *hgpp =
+      app.add_subcommand("hgpp", "hide physical page from guest reads")
+          ->ignore_case();
+  app.add_subcommand("hide", "hide physical page (alias)")
+      ->ignore_case()
+      ->group("");
 
-	add_command_option(kme, "module_name")->required();
+  add_transformed_command_option(hgpp, "physical_address", aliases_transformer)
+      ->required();
 
-	return kme;
+  return hgpp;
 }
 
-void process_kme(CLI::App* kme)
-{
-	const std::string module_name = get_command_option<std::string>(kme, "module_name");
+void process_hgpp(CLI::App *hgpp) {
+  const std::uint64_t physical_address =
+      get_command_option<std::uint64_t>(hgpp, "physical_address");
 
-	if (sys::kernel::modules_list.contains(module_name) == false)
-	{
-		std::println("module not found");
+  const std::uint64_t hide_status =
+      hypercall::hide_guest_physical_page(physical_address);
 
-		return;
-	}
-
-	const sys::kernel_module_t module = sys::kernel::modules_list[module_name];
-
-	for (auto& [export_name, export_address] : module.exports)
-	{
-		std::println("{} = 0x{:X}", export_name, export_address);
-	}
+  if (hide_status == 1) {
+    console::success(std::format("Page hidden: PA 0x{:X} (page 0x{:X})",
+                                 physical_address, physical_address >> 12));
+  } else {
+    console::error("Failed to hide page",
+                   std::format("PA=0x{:X}", physical_address));
+  }
 }
 
-CLI::App* init_dkm(CLI::App& app)
-{
-	CLI::App* dkm = app.add_subcommand("dkm", "dump kernel module to a file on disk")->ignore_case();
+CLI::App *init_fl(CLI::App &app) {
+  CLI::App *fl = app.add_subcommand("fl", "flush and display trap frame logs")
+                     ->ignore_case();
+  app.add_subcommand("logs", "flush and display trap frame logs (alias)")
+      ->ignore_case()
+      ->group("");
 
-	add_command_option(dkm, "module_name")->required();
-	add_command_option(dkm, "output_directory")->required();
-
-	return dkm;
+  return fl;
 }
 
-void process_dkm(CLI::App* dkm)
-{
-	const std::string module_name = get_command_option<std::string>(dkm, "module_name");
+void process_fl(CLI::App *fl) {
+  constexpr std::uint64_t log_count = 100;
+  constexpr std::uint64_t failed_log_count = static_cast<std::uint64_t>(-1);
 
-	if (sys::kernel::modules_list.contains(module_name) == false)
-	{
-		std::println("module not found");
+  std::vector<trap_frame_log_t> logs(log_count);
 
-		return;
-	}
+  const std::uint64_t logs_flushed = hypercall::flush_logs(logs);
 
-	const std::string output_directory = get_command_option<std::string>(dkm, "output_directory");
+  if (logs_flushed == failed_log_count) {
+    console::error("Failed to flush logs");
+    return;
+  }
 
-	const std::uint8_t status = sys::kernel::dump_module_to_disk(module_name, output_directory);
+  if (logs_flushed == 0) {
+    console::info("No logs to flush");
+    return;
+  }
 
-	if (status == 1)
-	{
-		std::println("success in dumping module");
-	}
-	else
-	{
-		std::println("failed to dump module");
-	}
+  console::success(std::format("Flushed {} log entries", logs_flushed));
+  std::println("");
+
+  for (std::uint64_t i = 0; i < logs_flushed; i++) {
+    const trap_frame_log_t &log = logs[i];
+
+    if (log.rip == 0)
+      break;
+
+    console::separator(std::format("Log #{}", i + 1));
+
+    // Registers in a clean format
+    console::print_value("RIP", log.rip);
+    console::print_value("CR3", log.cr3);
+    std::println("");
+
+    std::println(
+        "  {}RAX{} {:016X}  {}RCX{} {:016X}  {}RDX{} {:016X}  {}RBX{} {:016X}",
+        console::color::gray, console::color::reset, log.rax,
+        console::color::gray, console::color::reset, log.rcx,
+        console::color::gray, console::color::reset, log.rdx,
+        console::color::gray, console::color::reset, log.rbx);
+    std::println(
+        "  {}RSP{} {:016X}  {}RBP{} {:016X}  {}RSI{} {:016X}  {}RDI{} {:016X}",
+        console::color::gray, console::color::reset, log.rsp,
+        console::color::gray, console::color::reset, log.rbp,
+        console::color::gray, console::color::reset, log.rsi,
+        console::color::gray, console::color::reset, log.rdi);
+    std::println(
+        "  {}R8 {} {:016X}  {}R9 {} {:016X}  {}R10{} {:016X}  {}R11{} {:016X}",
+        console::color::gray, console::color::reset, log.r8,
+        console::color::gray, console::color::reset, log.r9,
+        console::color::gray, console::color::reset, log.r10,
+        console::color::gray, console::color::reset, log.r11);
+    std::println(
+        "  {}R12{} {:016X}  {}R13{} {:016X}  {}R14{} {:016X}  {}R15{} {:016X}",
+        console::color::gray, console::color::reset, log.r12,
+        console::color::gray, console::color::reset, log.r13,
+        console::color::gray, console::color::reset, log.r14,
+        console::color::gray, console::color::reset, log.r15);
+
+    std::println("\n  {}Stack:{}", console::color::dim, console::color::reset);
+    for (const std::uint64_t stack_value : log.stack_data) {
+      if (stack_value != 0)
+        std::println("    0x{:016X}", stack_value);
+    }
+    std::println("");
+  }
 }
 
-CLI::App* init_gva(CLI::App& app, CLI::Transformer& aliases_transformer)
-{
-	CLI::App* gva = app.add_subcommand("gva", "get the numerical value of an alias")->ignore_case();
+// ============================================================================
+// ANALYSIS COMMANDS
+// ============================================================================
 
-	add_transformed_command_option(gva, "alias_name", aliases_transformer)->required();
+CLI::App *init_hfpc(CLI::App &app) {
+  CLI::App *hfpc =
+      app.add_subcommand("hfpc", "get hyperv-attachment heap free page count")
+          ->ignore_case();
+  app.add_subcommand("heap", "heap free page count (alias)")
+      ->ignore_case()
+      ->group("");
 
-	return gva;
+  return hfpc;
 }
 
-void process_gva(CLI::App* gva)
-{
-	const std::uint64_t alias_value = get_command_option<std::uint64_t>(gva, "alias_name");
+void process_hfpc(CLI::App *hfpc) {
+  const std::uint64_t heap_free_page_count =
+      hypercall::get_heap_free_page_count();
 
-	std::println("alias value: 0x{:X}", alias_value);
+  console::print_value("Heap Free Pages", heap_free_page_count);
+  console::print_value("Heap Free Memory", heap_free_page_count * 0x1000);
+  console::info(
+      std::format("~{}", console::format_size(heap_free_page_count * 0x1000)));
 }
 
-std::unordered_map<std::string, std::uint64_t> form_aliases()
-{
-	std::unordered_map<std::string, std::uint64_t> aliases = { { "current_cr3", sys::current_cr3 } };
+CLI::App *init_lkm(CLI::App &app) {
+  CLI::App *lkm =
+      app.add_subcommand("lkm", "list loaded kernel modules")->ignore_case();
+  app.add_subcommand("modules", "list loaded kernel modules (alias)")
+      ->ignore_case()
+      ->group("");
 
-	for (auto& [module_name, module_info] : sys::kernel::modules_list)
-	{
-		aliases.insert({ module_name, module_info.base_address });
-		aliases.insert(module_info.exports.begin(), module_info.exports.end());
-	}
-
-	return aliases;
+  return lkm;
 }
 
-void commands::process(const std::string command)
-{
-	if (command.empty() == true)
-	{
-		return;
-	}
+void process_lkm(CLI::App *lkm) {
+  console::info(
+      std::format("Loaded Modules: {}", sys::kernel::modules_list.size()));
+  std::println("");
 
-	CLI::App app;
-	app.require_subcommand();
+  std::println("  {}{:<30} {:<18} {:<12}{}", console::color::dim, "MODULE",
+               "BASE", "SIZE", console::color::reset);
+  console::separator();
 
-	sys::kernel::parse_modules();
-
-	const std::unordered_map<std::string, std::uint64_t> aliases = form_aliases();
-
-	CLI::Transformer aliases_transformer = CLI::Transformer(aliases, CLI::ignore_case);
-
-	aliases_transformer.description(" can_use_aliases");
-
-	CLI::App* rgpm = init_rgpm(app, aliases_transformer);
-	CLI::App* wgpm = init_wgpm(app, aliases_transformer);
-	CLI::App* cgpm = init_cgpm(app, aliases_transformer);
-	CLI::App* gvat = init_gvat(app, aliases_transformer);
-	CLI::App* rgvm = init_rgvm(app, aliases_transformer);
-	CLI::App* wgvm = init_wgvm(app, aliases_transformer);
-	CLI::App* cgvm = init_cgvm(app, aliases_transformer);
-	CLI::App* akh = init_akh(app, aliases_transformer);
-	CLI::App* rkh = init_rkh(app, aliases_transformer);
-	CLI::App* gva = init_gva(app, aliases_transformer);
-	CLI::App* hgpp = init_hgpp(app, aliases_transformer);
-	CLI::App* fl = init_fl(app);
-	CLI::App* hfpc = init_hfpc(app);
-	CLI::App* lkm = init_lkm(app);
-	CLI::App* kme = init_kme(app);
-	CLI::App* dkm = init_dkm(app);
-
-	try
-	{
-		app.parse(command);
-
-		d_initial_process_command(rgpm);
-		d_process_command(wgpm);
-		d_process_command(cgpm);
-		d_process_command(gvat);
-		d_process_command(rgvm);
-		d_process_command(wgvm);
-		d_process_command(cgvm);
-		d_process_command(akh);
-		d_process_command(rkh);
-		d_process_command(gva);
-		d_process_command(hgpp);
-		d_process_command(fl);
-		d_process_command(hfpc);
-		d_process_command(lkm);
-		d_process_command(kme);
-		d_process_command(dkm);
-	}
-	catch (const CLI::ParseError& error)
-	{
-		app.exit(error);
-	}
+  for (const auto &[module_name, module_info] : sys::kernel::modules_list) {
+    std::println("  {:<30} {}0x{:016X}{}  {}", module_name,
+                 console::color::cyan, module_info.base_address,
+                 console::color::reset, console::format_size(module_info.size));
+  }
+  std::println("");
 }
 
+CLI::App *init_kme(CLI::App &app) {
+  CLI::App *kme = app.add_subcommand("kme", "list exports of a kernel module")
+                      ->ignore_case();
+  app.add_subcommand("exports", "list exports of a kernel module (alias)")
+      ->ignore_case()
+      ->group("");
+
+  add_command_option(kme, "module_name")->required();
+  add_command_option(kme, "--filter"); // optional filter
+
+  return kme;
+}
+
+void process_kme(CLI::App *kme) {
+  const std::string module_name =
+      get_command_option<std::string>(kme, "module_name");
+  const std::string filter = get_command_option<std::string>(kme, "--filter");
+
+  if (sys::kernel::modules_list.contains(module_name) == false) {
+    console::error("Module not found", module_name);
+    return;
+  }
+
+  const sys::kernel_module_t module = sys::kernel::modules_list[module_name];
+
+  std::uint64_t shown = 0;
+  console::info(std::format("Exports from '{}' (base: 0x{:X})", module_name,
+                            module.base_address));
+  std::println("");
+
+  for (auto &[export_name, export_address] : module.exports) {
+    // Apply filter if provided
+    if (!filter.empty() && export_name.find(filter) == std::string::npos)
+      continue;
+
+    std::println("  {}0x{:016X}{}  {}", console::color::cyan, export_address,
+                 console::color::reset, export_name);
+    shown++;
+  }
+
+  std::println("\n{}Shown {} of {} exports{}", console::color::dim, shown,
+               module.exports.size(), console::color::reset);
+}
+
+CLI::App *init_dkm(CLI::App &app) {
+  CLI::App *dkm =
+      app.add_subcommand("dkm", "dump kernel module to file")->ignore_case();
+  app.add_subcommand("dumpmod", "dump kernel module to file (alias)")
+      ->ignore_case()
+      ->group("");
+
+  add_command_option(dkm, "module_name")->required();
+  add_command_option(dkm, "output_directory")->required();
+
+  return dkm;
+}
+
+void process_dkm(CLI::App *dkm) {
+  const std::string module_name =
+      get_command_option<std::string>(dkm, "module_name");
+
+  if (sys::kernel::modules_list.contains(module_name) == false) {
+    console::error("Module not found", module_name);
+    return;
+  }
+
+  const std::string output_directory =
+      get_command_option<std::string>(dkm, "output_directory");
+
+  console::info(
+      std::format("Dumping '{}' to '{}'...", module_name, output_directory));
+
+  const std::uint8_t status =
+      sys::kernel::dump_module_to_disk(module_name, output_directory);
+
+  if (status == 1) {
+    std::string output_path = output_directory + "\\dump_" + module_name;
+    console::success(std::format("Module dumped to '{}'", output_path));
+  } else {
+    console::error("Failed to dump module", "check path and permissions");
+  }
+}
+
+CLI::App *init_gva(CLI::App &app, CLI::Transformer &aliases_transformer) {
+  CLI::App *gva =
+      app.add_subcommand("gva", "resolve alias to numerical address")
+          ->ignore_case();
+  app.add_subcommand("resolve", "resolve alias to address (alias)")
+      ->ignore_case()
+      ->group("");
+
+  add_transformed_command_option(gva, "alias_name", aliases_transformer)
+      ->required();
+
+  return gva;
+}
+
+void process_gva(CLI::App *gva) {
+  const std::uint64_t alias_value =
+      get_command_option<std::uint64_t>(gva, "alias_name");
+
+  console::print_value("Address", alias_value);
+}
+
+// ============================================================================
+// MAIN COMMAND PROCESSOR
+// ============================================================================
+
+std::unordered_map<std::string, std::uint64_t> form_aliases() {
+  std::unordered_map<std::string, std::uint64_t> aliases = {
+      {"current_cr3", sys::current_cr3}};
+
+  for (auto &[module_name, module_info] : sys::kernel::modules_list) {
+    aliases.insert({module_name, module_info.base_address});
+    aliases.insert(module_info.exports.begin(), module_info.exports.end());
+  }
+
+  return aliases;
+}
+
+void commands::process(const std::string command) {
+  if (command.empty() == true) {
+    return;
+  }
+
+  CLI::App app;
+  app.require_subcommand();
+
+  sys::kernel::parse_modules();
+
+  const std::unordered_map<std::string, std::uint64_t> aliases = form_aliases();
+
+  CLI::Transformer aliases_transformer =
+      CLI::Transformer(aliases, CLI::ignore_case);
+  aliases_transformer.description(" (alias)");
+
+  // Session commands
+  CLI::App *status = init_status(app);
+  CLI::App *help_cmd = init_help_cmd(app);
+
+  // Memory commands
+  CLI::App *rgpm = init_rgpm(app, aliases_transformer);
+  CLI::App *wgpm = init_wgpm(app, aliases_transformer);
+  CLI::App *cgpm = init_cgpm(app, aliases_transformer);
+  CLI::App *gvat = init_gvat(app, aliases_transformer);
+  CLI::App *rgvm = init_rgvm(app, aliases_transformer);
+  CLI::App *wgvm = init_wgvm(app, aliases_transformer);
+  CLI::App *cgvm = init_cgvm(app, aliases_transformer);
+  CLI::App *dump = init_dump(app, aliases_transformer);
+  CLI::App *dis = init_disasm(app, aliases_transformer);
+
+  // Hooking commands
+  CLI::App *akh = init_akh(app, aliases_transformer);
+  CLI::App *rkh = init_rkh(app, aliases_transformer);
+  CLI::App *hgpp = init_hgpp(app, aliases_transformer);
+  CLI::App *fl = init_fl(app);
+
+  // Analysis commands
+  CLI::App *hfpc = init_hfpc(app);
+  CLI::App *lkm = init_lkm(app);
+  CLI::App *kme = init_kme(app);
+  CLI::App *dkm = init_dkm(app);
+  CLI::App *gva = init_gva(app, aliases_transformer);
+
+  try {
+    app.parse(command);
+
+    // Session
+    d_initial_process_command(status);
+    d_process_command(help_cmd);
+
+    // Memory
+    d_process_command(rgpm);
+    d_process_command(wgpm);
+    d_process_command(cgpm);
+    d_process_command(gvat);
+    d_process_command(rgvm);
+    d_process_command(wgvm);
+    d_process_command(cgvm);
+    d_process_command(dump);
+    d_process_command(dis);
+
+    // Hooking
+    d_process_command(akh);
+    d_process_command(rkh);
+    d_process_command(hgpp);
+    d_process_command(fl);
+
+    // Analysis
+    d_process_command(hfpc);
+    d_process_command(lkm);
+    d_process_command(kme);
+    d_process_command(dkm);
+    d_process_command(gva);
+  } catch (const CLI::ParseError &error) {
+    app.exit(error);
+  }
+}

@@ -197,6 +197,8 @@
     <ClInclude Include="src\hypercall\hypercall.h" />
     <ClInclude Include="src\system\system.h" />
     <ClInclude Include="src\system\system_def.h" />
+    <ClInclude Include="src\util\console.h" />
+    <ClInclude Include="src\util\disasm.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
