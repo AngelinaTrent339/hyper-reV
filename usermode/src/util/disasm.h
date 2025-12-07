@@ -6,7 +6,6 @@
 #include <string>
 #include <vector>
 
-
 // Simple x64 disassembly display (basic instruction identification)
 // Note: Project already links Zydis.lib - this is a fallback for quick viewing
 namespace disasm {
@@ -79,6 +78,46 @@ inline std::string identify_instruction(const std::uint8_t *bytes,
     return "pop rsi";
   case 0x5F:
     return "pop rdi";
+  }
+
+  // REX prefix 0x40 (REX without any bits) - handle push/pop with REX
+  if (bytes[0] == 0x40 && size >= 2) {
+    consumed = 2;
+    switch (bytes[1]) {
+    case 0x50:
+      return "push rax";
+    case 0x51:
+      return "push rcx";
+    case 0x52:
+      return "push rdx";
+    case 0x53:
+      return "push rbx";
+    case 0x54:
+      return "push rsp";
+    case 0x55:
+      return "push rbp";
+    case 0x56:
+      return "push rsi";
+    case 0x57:
+      return "push rdi";
+    case 0x58:
+      return "pop rax";
+    case 0x59:
+      return "pop rcx";
+    case 0x5A:
+      return "pop rdx";
+    case 0x5B:
+      return "pop rbx";
+    case 0x5C:
+      return "pop rsp";
+    case 0x5D:
+      return "pop rbp";
+    case 0x5E:
+      return "pop rsi";
+    case 0x5F:
+      return "pop rdi";
+    }
+    consumed = 1;
   }
 
   // REX.B + push/pop r8-r15
