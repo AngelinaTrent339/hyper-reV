@@ -124,5 +124,11 @@
     <ClInclude Include="src\hook\hook_disassembly.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="src\util\console.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\util\disasm.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>
