@@ -7,12 +7,10 @@
 #include <CLI/CLI.hpp>
 #include <hypercall/hypercall_def.h>
 
-
 #include <array>
 #include <chrono>
 #include <format>
 #include <print>
-
 
 #define d_invoke_command_processor(command) process_##command(##command)
 #define d_initial_process_command(command)                                     \
@@ -543,7 +541,7 @@ CLI::App *init_disasm(CLI::App &app, CLI::Transformer &aliases_transformer) {
   return dis;
 }
 
-void process_disasm(CLI::App *dis) {
+void process_dis(CLI::App *dis) {
   const std::uint64_t address =
       get_command_option<std::uint64_t>(dis, "address");
   const std::uint64_t size = get_command_option<std::uint64_t>(dis, "size");
