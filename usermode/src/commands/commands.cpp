@@ -165,6 +165,20 @@ void process_help_cmd(CLI::App *help_cmd) {
   std::println("  {}exit{}                                 - exit session\n",
                console::color::magenta, console::color::reset);
 
+  std::println("{}Syscall Interception (Hypervisor-Level!):{}",
+               console::color::bold, console::color::reset);
+  std::println(
+      "  {}syscall start{}                        - start logging ALL syscalls",
+      console::color::red, console::color::reset);
+  std::println("  {}syscall stop{}                         - stop logging",
+               console::color::red, console::color::reset);
+  std::println(
+      "  {}syscall logs{}                         - view captured syscalls",
+      console::color::red, console::color::reset);
+  std::println(
+      "  {}syscall status{}                       - show interception status\n",
+      console::color::red, console::color::reset);
+
   std::println("{}Tip:{} Use module names/exports as aliases: e.g., "
                "'ntoskrnl.exe!KeQueryPerformanceCounter'",
                console::color::dim, console::color::reset);
@@ -1073,6 +1087,379 @@ void process_gva(CLI::App *gva) {
 }
 
 // ============================================================================
+// HYPERVISOR-LEVEL SYSCALL INTERCEPTION
+// ============================================================================
+
+namespace syscall_intercept {
+// State tracking
+static bool g_enabled = false;
+static std::uint64_t g_lstar_address = 0;
+static void *g_shadow_page = nullptr;
+static std::uint64_t g_shadow_page_pa = 0;
+
+// Syscall names for display (common syscalls)
+static const std::unordered_map<std::uint64_t, const char *> syscall_names = {
+    {0, "NtAccessCheck"},
+    {4, "NtWaitForSingleObject"},
+    {6, "NtReadFile"},
+    {7, "NtDeviceIoControlFile"},
+    {8, "NtWriteFile"},
+    {15, "NtClose"},
+    {16, "NtQueryObject"},
+    {17, "NtQueryInformationFile"},
+    {18, "NtOpenKey"},
+    {24, "NtAllocateVirtualMemory"},
+    {25, "NtQueryInformationProcess"},
+    {30, "NtFreeVirtualMemory"},
+    {35, "NtQueryVirtualMemory"},
+    {38, "NtOpenProcess"},
+    {40, "NtMapViewOfSection"},
+    {42, "NtUnmapViewOfSection"},
+    {44, "NtTerminateProcess"},
+    {51, "NtOpenFile"},
+    {54, "NtQuerySystemInformation"},
+    {58, "NtWriteVirtualMemory"},
+    {63, "NtReadVirtualMemory"},
+    {74, "NtCreateSection"},
+    {80, "NtProtectVirtualMemory"},
+    {82, "NtResumeThread"},
+    {83, "NtTerminateThread"},
+    {85, "NtCreateFile"},
+    {91, "NtWaitForMultipleObjects"},
+    {201, "NtCreateThreadEx"},
+    {209, "NtCreateUserProcess"},
+};
+
+const char *get_syscall_name(std::uint64_t syscall_num) {
+  auto it = syscall_names.find(syscall_num);
+  if (it != syscall_names.end()) {
+    return it->second;
+  }
+  return nullptr;
+}
+} // namespace syscall_intercept
+
+CLI::App *init_syscall(CLI::App &app) {
+  CLI::App *syscall_cmd =
+      app.add_subcommand("syscall",
+                         "hypervisor-level syscall interception (no SSDT!)")
+          ->ignore_case();
+
+  // Subcommands
+  syscall_cmd->add_subcommand("start", "start syscall interception");
+  syscall_cmd->add_subcommand("stop", "stop syscall interception");
+  syscall_cmd->add_subcommand("logs", "show captured syscall logs");
+  syscall_cmd->add_subcommand("status", "show syscall interception status");
+
+  auto filter_cmd = syscall_cmd->add_subcommand("filter", "set syscall filter");
+  add_command_option(filter_cmd, "--min");
+  add_command_option(filter_cmd, "--max");
+  add_command_option(filter_cmd, "--cr3");
+
+  return syscall_cmd;
+}
+
+void process_syscall(CLI::App *syscall_cmd) {
+  auto start_cmd = syscall_cmd->get_subcommand("start");
+  auto stop_cmd = syscall_cmd->get_subcommand("stop");
+  auto logs_cmd = syscall_cmd->get_subcommand("logs");
+  auto status_cmd = syscall_cmd->get_subcommand("status");
+  auto filter_cmd = syscall_cmd->get_subcommand("filter");
+
+  if (*start_cmd) {
+    if (syscall_intercept::g_enabled) {
+      console::warn("Syscall interception already enabled");
+      return;
+    }
+
+    console::info("Starting hypervisor-level syscall interception...");
+
+    // Read LSTAR MSR to get KiSystemCall64 address
+    // On Windows, LSTAR (0xC0000082) contains the syscall entry point
+    std::uint64_t lstar = 0;
+
+    // We need to get LSTAR from kernel - it's stored in ntoskrnl
+    // Read it via hypervisor by finding KeServiceDescriptorTable or similar
+    // For now, we'll use a pattern scan approach
+
+    // Look for exported KiSystemCall64 or scan for it
+    auto &ntoskrnl = sys::kernel::modules_list["ntoskrnl.exe"];
+
+    // Try to find KiSystemCall64Shadow or KiSystemCall64 export
+    if (ntoskrnl.exports.contains("KiSystemCall64")) {
+      lstar = ntoskrnl.exports["KiSystemCall64"];
+    } else if (ntoskrnl.exports.contains("ntoskrnl.exe!KiSystemCall64")) {
+      lstar = ntoskrnl.exports["ntoskrnl.exe!KiSystemCall64"];
+    } else {
+      // Pattern scan for KiSystemCall64 - it starts with: 0F 01 F8 (swapgs)
+      // followed by specific code
+      console::info("    Scanning for KiSystemCall64...");
+
+      constexpr std::uint64_t scan_size = 0x400000;
+      std::vector<std::uint8_t> ntoskrnl_bytes(scan_size);
+
+      hypercall::read_guest_virtual_memory(ntoskrnl_bytes.data(),
+                                           ntoskrnl.base_address,
+                                           sys::current_cr3, scan_size);
+
+      // KiSystemCall64 signature: 0F 01 F8 (swapgs) followed by typical pattern
+      const std::uint8_t pattern[] = {0x0F, 0x01, 0xF8, 0x65,
+                                      0x48, 0x89, 0x24, 0x25};
+
+      for (std::uint64_t i = 0; i < scan_size - sizeof(pattern); i++) {
+        bool match = true;
+        for (size_t j = 0; j < sizeof(pattern); j++) {
+          if (ntoskrnl_bytes[i + j] != pattern[j]) {
+            match = false;
+            break;
+          }
+        }
+        if (match) {
+          lstar = ntoskrnl.base_address + i;
+          break;
+        }
+      }
+    }
+
+    if (lstar == 0) {
+      console::error("Failed to locate KiSystemCall64");
+      return;
+    }
+
+    console::print_value("KiSystemCall64", lstar);
+
+    // Allocate shadow page for our hook
+    syscall_intercept::g_shadow_page =
+        sys::user::allocate_locked_memory(0x1000, PAGE_EXECUTE_READWRITE);
+    if (syscall_intercept::g_shadow_page == nullptr) {
+      console::error("Failed to allocate shadow page");
+      return;
+    }
+
+    // Read original code
+    std::uint8_t original_bytes[256] = {0};
+    hypercall::read_guest_virtual_memory(
+        original_bytes, lstar, sys::current_cr3, sizeof(original_bytes));
+
+    // Build shadow page with logging stub + original code
+    std::uint8_t *shadow =
+        static_cast<std::uint8_t *>(syscall_intercept::g_shadow_page);
+
+    // The stub will:
+    // 1. Execute a hypercall to log the syscall (via CPUID with magic)
+    // 2. Execute the original swapgs and code
+
+    // Logging stub (uses CPUID hypercall):
+    // push rcx
+    // mov ecx, <hypercall_magic>  ; Our hypercall key for log_current_state
+    // cpuid
+    // pop rcx
+    // <original bytes>
+
+    hypercall_info_t log_call = {};
+    log_call.primary_key = hypercall_primary_key;
+    log_call.secondary_key = hypercall_secondary_key;
+    log_call.call_type = hypercall_type_t::log_current_state;
+
+    std::uint8_t logging_stub[] = {
+        0x51,                         // push rcx
+        0xB9, 0x00, 0x00, 0x00, 0x00, // mov ecx, <magic>
+        0x0F, 0xA2,                   // cpuid
+        0x59,                         // pop rcx
+    };
+
+    // Fill in the hypercall magic value
+    *reinterpret_cast<std::uint32_t *>(&logging_stub[2]) =
+        static_cast<std::uint32_t>(log_call.value);
+
+    // Copy stub to shadow page
+    memcpy(shadow, logging_stub, sizeof(logging_stub));
+
+    // Copy original bytes after stub
+    memcpy(shadow + sizeof(logging_stub), original_bytes,
+           sizeof(original_bytes) - sizeof(logging_stub));
+
+    // Translate shadow page to physical
+    syscall_intercept::g_shadow_page_pa =
+        hypercall::translate_guest_virtual_address(
+            reinterpret_cast<std::uint64_t>(syscall_intercept::g_shadow_page),
+            sys::current_cr3);
+
+    if (syscall_intercept::g_shadow_page_pa == 0) {
+      console::error("Failed to translate shadow page");
+      sys::user::free_memory(syscall_intercept::g_shadow_page);
+      syscall_intercept::g_shadow_page = nullptr;
+      return;
+    }
+
+    // Translate LSTAR VA to PA
+    std::uint64_t lstar_pa =
+        hypercall::translate_guest_virtual_address(lstar, sys::current_cr3);
+    if (lstar_pa == 0) {
+      console::error("Failed to translate KiSystemCall64");
+      sys::user::free_memory(syscall_intercept::g_shadow_page);
+      syscall_intercept::g_shadow_page = nullptr;
+      return;
+    }
+
+    console::print_value("KiSystemCall64 PA", lstar_pa);
+    console::print_value("Shadow Page PA", syscall_intercept::g_shadow_page_pa);
+
+    // Add NPT hook via hypervisor!
+    std::uint64_t hook_result = hypercall::add_slat_code_hook(
+        lstar_pa, syscall_intercept::g_shadow_page_pa);
+
+    if (hook_result == 0) {
+      console::error("Failed to add NPT hook on KiSystemCall64");
+      sys::user::free_memory(syscall_intercept::g_shadow_page);
+      syscall_intercept::g_shadow_page = nullptr;
+      return;
+    }
+
+    syscall_intercept::g_lstar_address = lstar;
+    syscall_intercept::g_enabled = true;
+
+    console::success("Syscall interception enabled!");
+    console::info("All syscalls are now being logged at hypervisor level");
+    console::info("Use 'syscall logs' to view captured syscalls");
+    console::warn("Use 'syscall stop' before exiting to avoid BSOD!");
+  } else if (*stop_cmd) {
+    if (!syscall_intercept::g_enabled) {
+      console::warn("Syscall interception not enabled");
+      return;
+    }
+
+    console::info("Stopping syscall interception...");
+
+    // Remove the NPT hook
+    std::uint64_t lstar_pa = hypercall::translate_guest_virtual_address(
+        syscall_intercept::g_lstar_address, sys::current_cr3);
+
+    if (lstar_pa != 0) {
+      hypercall::remove_slat_code_hook(lstar_pa);
+    }
+
+    // Free shadow page
+    if (syscall_intercept::g_shadow_page != nullptr) {
+      sys::user::free_memory(syscall_intercept::g_shadow_page);
+      syscall_intercept::g_shadow_page = nullptr;
+    }
+
+    syscall_intercept::g_enabled = false;
+    syscall_intercept::g_lstar_address = 0;
+
+    console::success("Syscall interception disabled");
+  } else if (*logs_cmd) {
+    if (!syscall_intercept::g_enabled) {
+      console::warn(
+          "Syscall interception not enabled. Use 'syscall start' first.");
+      return;
+    }
+
+    // Flush trap frame logs (syscalls are logged via log_current_state
+    // hypercall)
+    constexpr std::uint64_t log_count = 100;
+    std::vector<trap_frame_log_t> logs(log_count);
+
+    std::uint64_t logs_flushed = hypercall::flush_logs(logs);
+
+    if (logs_flushed == static_cast<std::uint64_t>(-1)) {
+      console::error("Failed to flush logs");
+      return;
+    }
+
+    if (logs_flushed == 0) {
+      console::info("No syscalls captured yet");
+      return;
+    }
+
+    console::separator("Syscall Log");
+    std::println("  Captured {} syscalls\n", logs_flushed);
+
+    for (std::uint64_t i = 0; i < logs_flushed; i++) {
+      const auto &log = logs[i];
+
+      // RAX contains syscall number
+      std::uint64_t syscall_num = log.rax;
+      const char *name = syscall_intercept::get_syscall_name(syscall_num);
+
+      std::print("  {}[{:3}]{} ", console::color::cyan, i,
+                 console::color::reset);
+
+      if (name) {
+        std::print("{}#{}{} {}{}{}", console::color::yellow, syscall_num,
+                   console::color::reset, console::color::green, name,
+                   console::color::reset);
+      } else {
+        std::print("{}#{}{}", console::color::yellow, syscall_num,
+                   console::color::reset);
+      }
+
+      std::println(" | RIP: 0x{:X} | CR3: 0x{:X}", log.rip, log.cr3);
+
+      // Show args on separate line if verbose
+      std::println("        Args: RCX=0x{:X} RDX=0x{:X} R8=0x{:X} R9=0x{:X}",
+                   log.rcx, log.rdx, log.r8, log.r9);
+    }
+
+    console::separator();
+  } else if (*status_cmd) {
+    console::separator("Syscall Interception Status");
+
+    if (syscall_intercept::g_enabled) {
+      console::print_value("Status", "ENABLED");
+      console::print_value("KiSystemCall64",
+                           syscall_intercept::g_lstar_address);
+      console::print_value("Shadow Page PA",
+                           syscall_intercept::g_shadow_page_pa);
+    } else {
+      console::print_value("Status", "DISABLED");
+    }
+
+    console::separator();
+  } else if (*filter_cmd) {
+    std::uint64_t min_syscall =
+        get_command_option<std::uint64_t>(filter_cmd, "--min");
+    std::uint64_t max_syscall =
+        get_command_option<std::uint64_t>(filter_cmd, "--max");
+    std::uint64_t cr3_filter =
+        get_command_option<std::uint64_t>(filter_cmd, "--cr3");
+
+    if (max_syscall == 0)
+      max_syscall = 0xFFFFFFFF;
+
+    std::uint64_t result =
+        hypercall::set_syscall_filter(min_syscall, max_syscall, cr3_filter);
+
+    if (result) {
+      console::success(std::format("Filter set: syscalls {}-{}, CR3=0x{:X}",
+                                   min_syscall, max_syscall, cr3_filter));
+    } else {
+      console::error("Failed to set filter");
+    }
+  } else {
+    // No subcommand - show help
+    std::println("\n{}Syscall Interception Commands:{}", console::color::bold,
+                 console::color::reset);
+    std::println(
+        "  {}syscall start{}  - Start hypervisor-level syscall logging",
+        console::color::green, console::color::reset);
+    std::println("  {}syscall stop{}   - Stop syscall logging",
+                 console::color::green, console::color::reset);
+    std::println("  {}syscall logs{}   - View captured syscalls",
+                 console::color::green, console::color::reset);
+    std::println("  {}syscall status{} - Show interception status",
+                 console::color::green, console::color::reset);
+    std::println("  {}syscall filter --min N --max N --cr3 X{} - Set filter",
+                 console::color::green, console::color::reset);
+    std::println("");
+    std::println("{}NOTE:{} This hooks KiSystemCall64 directly via NPT - no "
+                 "SSDT needed!",
+                 console::color::yellow, console::color::reset);
+  }
+}
+
+// ============================================================================
 // MAIN COMMAND PROCESSOR
 // ============================================================================
 
@@ -1132,6 +1519,9 @@ void commands::process(const std::string command) {
   CLI::App *dkm = init_dkm(app);
   CLI::App *gva = init_gva(app, aliases_transformer);
 
+  // Hypervisor-level syscall interception
+  CLI::App *syscall_cmd = init_syscall(app);
+
   try {
     app.parse(command);
 
@@ -1162,7 +1552,31 @@ void commands::process(const std::string command) {
     d_process_command(kme);
     d_process_command(dkm);
     d_process_command(gva);
+
+    // Hypervisor-level syscall interception
+    d_process_command(syscall_cmd);
   } catch (const CLI::ParseError &error) {
     app.exit(error);
+  }
+}
+
+// Cleanup syscall interception on exit
+void commands::syscall_intercept_cleanup() {
+  if (syscall_intercept::g_enabled) {
+    // Remove the NPT hook
+    std::uint64_t lstar_pa = hypercall::translate_guest_virtual_address(
+        syscall_intercept::g_lstar_address, sys::current_cr3);
+
+    if (lstar_pa != 0) {
+      hypercall::remove_slat_code_hook(lstar_pa);
+    }
+
+    // Free shadow page
+    if (syscall_intercept::g_shadow_page != nullptr) {
+      sys::user::free_memory(syscall_intercept::g_shadow_page);
+      syscall_intercept::g_shadow_page = nullptr;
+    }
+
+    syscall_intercept::g_enabled = false;
   }
 }

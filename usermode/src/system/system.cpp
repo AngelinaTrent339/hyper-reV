@@ -4,8 +4,10 @@
 #include <filesystem>
 #include <fstream>
 
+#include "../commands/commands.h"
 #include "../hook/hook.h"
 #include "../hypercall/hypercall.h"
+
 
 #include <portable_executable/image.hpp>
 
@@ -798,7 +800,10 @@ std::uint8_t sys::set_up() {
   return 1;
 }
 
-void sys::clean_up() { hook::clean_up(); }
+void sys::clean_up() {
+  commands::syscall_intercept_cleanup();
+  hook::clean_up();
+}
 
 std::uint32_t sys::user::query_system_information(
     std::int32_t information_class, void *information_out,
