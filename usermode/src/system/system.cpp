@@ -239,121 +239,254 @@ static const std::unordered_map<std::string, std::uint32_t>
         {"NtWaitForDebugEvent", 484},
 };
 
-// Resolve syscall addresses using hypervisor read (invisible to PG)
-std::uint64_t resolve_syscalls_to_exports(sys::kernel_module_t &ntoskrnl) {
-  // KeServiceDescriptorTable is NOT exported on x64 Windows
-  // We need to pattern scan for it inside ntoskrnl
+// Validate that a resolved syscall address looks like valid kernel code
+static bool validate_syscall_address(std::uint64_t addr,
+                                     const sys::kernel_module_t &ntoskrnl) {
+  // Must be a canonical kernel address
+  if ((addr >> 48) != 0xFFFF) {
+    return false;
+  }
 
-  // Pattern: LEA r11, [KeServiceDescriptorTable] = 4C 8D 1D XX XX XX XX
-  // This is in KiSystemServiceRepeat and points directly to the SSDT
-  const std::uint8_t pattern1[] = {0x4C, 0x8D, 0x1D}; // lea r11, [rip+XXX]
-  const std::uint8_t pattern2[] = {0x4C, 0x8D,
-                                   0x15}; // lea r10, [rip+XXX] (shadow)
+  // Must be within ntoskrnl bounds
+  if (addr < ntoskrnl.base_address ||
+      addr >= ntoskrnl.base_address + ntoskrnl.size) {
+    return false;
+  }
 
-  // Read ntoskrnl .text section to find the pattern
+  // Read first bytes and check for valid function prologue
+  // Common prologues: mov edi, edi (8B FF), push rbp (55), sub rsp (48 83 EC),
+  // etc.
+  std::uint8_t prologue[8] = {0};
+  std::uint64_t bytes_read = hypercall::read_guest_virtual_memory(
+      prologue, addr, sys::current_cr3, sizeof(prologue));
+
+  if (bytes_read != sizeof(prologue)) {
+    return false;
+  }
+
+  // Check for common valid opcodes at function start
+  // 0x48 = REX.W prefix (common in x64)
+  // 0x40-0x4F = REX prefixes
+  // 0x55 = push rbp
+  // 0x56 = push rsi
+  // 0x57 = push rdi
+  // 0x41 = REX.B prefix
+  // 0x65 = GS segment override (TEB access)
+  // 0xB8-0xBF = mov r32, imm32
+  // 0x8B = mov
+  // 0x33 = xor
+  // 0xE9 = jmp (for forwarded functions)
+  // 0xCC = int3 (debug)
+  std::uint8_t first_byte = prologue[0];
+
+  // Allow REX prefixes, common instruction prefixes, and typical function
+  // starts
+  if ((first_byte >= 0x40 && first_byte <= 0x4F) || // REX
+      first_byte == 0x55 || first_byte == 0x56 ||
+      first_byte == 0x57 || // push rbp/rsi/rdi
+      first_byte == 0x65 || // GS segment (common in syscalls for TEB)
+      (first_byte >= 0xB8 && first_byte <= 0xBF) || // mov r32, imm
+      first_byte == 0x8B || first_byte == 0x33 ||   // mov, xor
+      first_byte == 0xE9 || first_byte == 0xEB ||   // jmp
+      first_byte == 0xCC || // int3 (not uncommon at function boundaries)
+      first_byte == 0x90) { // nop
+    return true;
+  }
+
+  return false;
+}
+
+// Try to find KiServiceTable using multiple pattern scanning strategies
+static std::uint64_t
+find_ki_service_table(const sys::kernel_module_t &ntoskrnl) {
+  // Strategy 1: Scan for LEA instructions referencing KeServiceDescriptorTable
+  // Pattern: 4C 8D 1D XX XX XX XX (lea r11, [rip+XXX]) in KiSystemServiceRepeat
+  // Pattern: 4C 8D 15 XX XX XX XX (lea r10, [rip+XXX]) shadow SSDT
+
   constexpr std::uint64_t scan_size = 0x800000; // 8MB should cover .text
   std::vector<std::uint8_t> ntoskrnl_bytes(scan_size);
 
-  hypercall::read_guest_virtual_memory(ntoskrnl_bytes.data(),
-                                       ntoskrnl.base_address, sys::current_cr3,
-                                       scan_size);
+  std::uint64_t bytes_read = hypercall::read_guest_virtual_memory(
+      ntoskrnl_bytes.data(), ntoskrnl.base_address, sys::current_cr3,
+      scan_size);
+
+  if (bytes_read < scan_size / 2) {
+    std::println("    [-] Failed to read ntoskrnl memory for pattern scan");
+    return 0;
+  }
+
+  // Patterns to search for (in order of reliability)
+  struct pattern_info {
+    std::uint8_t bytes[4];
+    std::uint8_t len;
+    const char *name;
+    bool reads_pointer; // If true, target points to a pointer to KiServiceTable
+  };
+
+  pattern_info patterns[] = {
+      // LEA r11, [rip+XXX] - Direct reference to KeServiceDescriptorTable
+      {{0x4C, 0x8D, 0x1D, 0x00},
+       3,
+       "lea r11, [KeServiceDescriptorTable]",
+       true},
+      // LEA r10, [rip+XXX] - Shadow SSDT reference
+      {{0x4C, 0x8D, 0x15, 0x00}, 3, "lea r10, [rip+XXX]", true},
+      // MOV rax, [rip+XXX] - Sometimes used
+      {{0x48, 0x8B, 0x05, 0x00}, 3, "mov rax, [rip+XXX]", true},
+  };
 
   std::uint64_t ki_service_table = 0;
 
-  // Scan for the pattern - try both patterns
-  for (int pattern_idx = 0; pattern_idx < 2 && ki_service_table == 0;
-       pattern_idx++) {
-    const std::uint8_t *pattern = (pattern_idx == 0) ? pattern1 : pattern2;
+  for (const auto &pattern : patterns) {
+    if (ki_service_table != 0)
+      break;
 
-    for (std::uint64_t i = 0; i < scan_size - 16; i++) {
-      if (ntoskrnl_bytes[i] == pattern[0] &&
-          ntoskrnl_bytes[i + 1] == pattern[1] &&
-          ntoskrnl_bytes[i + 2] == pattern[2]) {
-
-        // Found potential match - extract the RIP-relative offset
-        std::int32_t rip_offset =
-            *reinterpret_cast<std::int32_t *>(&ntoskrnl_bytes[i + 3]);
-
-        // Calculate the actual address: RIP + offset + instruction_size(7)
-        std::uint64_t instruction_addr = ntoskrnl.base_address + i;
-        std::uint64_t target_addr = instruction_addr + 7 + rip_offset;
-
-        // Target must be within ntoskrnl and look like kernel address
-        if ((target_addr >> 48) != 0xFFFF)
-          continue;
-        if (target_addr < ntoskrnl.base_address)
-          continue;
-        if (target_addr > ntoskrnl.base_address + ntoskrnl.size + 0x1000000)
-          continue;
-
-        // Read the first QWORD from the target to get KiServiceTable pointer
-        std::uint64_t potential_table = 0;
-        hypercall::read_guest_virtual_memory(&potential_table, target_addr,
-                                             sys::current_cr3,
-                                             sizeof(std::uint64_t));
-
-        // Verify it's a valid kernel pointer (code section address)
-        if ((potential_table >> 48) != 0xFFFF)
-          continue;
-        if (potential_table < ntoskrnl.base_address)
-          continue;
-        if (potential_table > ntoskrnl.base_address + ntoskrnl.size)
-          continue;
-
-        // Validate: read first few SSDT entries and check they look valid
-        // SSDT entries on x64 are 4-byte relative offsets with arg count in low
-        // 4 bits
-        std::int32_t test_entries[4] = {0};
-        hypercall::read_guest_virtual_memory(test_entries, potential_table,
-                                             sys::current_cr3,
-                                             sizeof(test_entries));
-
-        // All test entries should be positive and within reasonable range (<
-        // 16MB offset)
-        bool valid = true;
-        for (int j = 0; j < 4; j++) {
-          std::int32_t offset = test_entries[j] >> 4; // Remove arg count bits
-          if (offset < 0 || offset > 0x1000000) {
-            valid = false;
-            break;
-          }
-        }
-
-        if (valid) {
-          ki_service_table = potential_table;
+    for (std::uint64_t i = 0; i < bytes_read - 16; i++) {
+      bool match = true;
+      for (std::uint8_t j = 0; j < pattern.len; j++) {
+        if (ntoskrnl_bytes[i + j] != pattern.bytes[j]) {
+          match = false;
           break;
         }
+      }
+
+      if (!match)
+        continue;
+
+      // Extract RIP-relative offset (4 bytes after pattern)
+      std::int32_t rip_offset =
+          *reinterpret_cast<std::int32_t *>(&ntoskrnl_bytes[i + pattern.len]);
+
+      // Calculate target address: current_rip + instruction_length + offset
+      std::uint64_t instruction_addr = ntoskrnl.base_address + i;
+      std::uint64_t instruction_len =
+          pattern.len + 4; // pattern + 4-byte offset
+      std::uint64_t target_addr =
+          instruction_addr + instruction_len + rip_offset;
+
+      // Validate target is within ntoskrnl
+      if ((target_addr >> 48) != 0xFFFF)
+        continue;
+      if (target_addr < ntoskrnl.base_address)
+        continue;
+      if (target_addr > ntoskrnl.base_address + ntoskrnl.size + 0x100000)
+        continue;
+
+      std::uint64_t potential_table = target_addr;
+
+      // If pattern reads a pointer, dereference it
+      if (pattern.reads_pointer) {
+        std::uint64_t ptr_value = 0;
+        hypercall::read_guest_virtual_memory(
+            &ptr_value, target_addr, sys::current_cr3, sizeof(std::uint64_t));
+
+        // The pointer should point to KiServiceTable within ntoskrnl
+        if ((ptr_value >> 48) != 0xFFFF)
+          continue;
+        if (ptr_value < ntoskrnl.base_address)
+          continue;
+        if (ptr_value > ntoskrnl.base_address + ntoskrnl.size)
+          continue;
+
+        potential_table = ptr_value;
+      }
+
+      // Validate: Read first few SSDT entries and check format
+      // SSDT entries are 4-byte signed offsets with arg count in low 4 bits
+      std::int32_t test_entries[8] = {0};
+      hypercall::read_guest_virtual_memory(test_entries, potential_table,
+                                           sys::current_cr3,
+                                           sizeof(test_entries));
+
+      // Validation: entries should be non-zero and offsets should be in
+      // reasonable range
+      int valid_entries = 0;
+      for (int j = 0; j < 8; j++) {
+        if (test_entries[j] == 0)
+          continue;
+
+        // Extract the offset (signed, upper 28 bits)
+        std::int32_t offset = test_entries[j] >> 4;
+
+        // Offset should be reasonable (within ~16MB range from table base)
+        // Note: offset can be negative (for entries before table)
+        if (offset > -0x1000000 && offset < 0x1000000) {
+          // Calculate the target address and verify it's in ntoskrnl
+          std::uint64_t func_addr = potential_table + offset;
+          if (func_addr >= ntoskrnl.base_address &&
+              func_addr < ntoskrnl.base_address + ntoskrnl.size) {
+            valid_entries++;
+          }
+        }
+      }
+
+      // Need at least 6 valid entries out of 8
+      if (valid_entries >= 6) {
+        ki_service_table = potential_table;
+        std::println("    [+] Found KiServiceTable at 0x{:X} via pattern '{}'",
+                     ki_service_table, pattern.name);
+        break;
       }
     }
   }
 
+  return ki_service_table;
+}
+
+// Resolve syscall addresses using hypervisor read (invisible to PG)
+std::uint64_t resolve_syscalls_to_exports(sys::kernel_module_t &ntoskrnl) {
+  std::println("    [*] Resolving syscall addresses...");
+
+  std::uint64_t ki_service_table = find_ki_service_table(ntoskrnl);
+
   if (ki_service_table == 0) {
+    std::println("    [-] Failed to locate KiServiceTable");
     return 0;
   }
 
   std::uint64_t syscalls_resolved = 0;
+  std::uint64_t syscalls_failed = 0;
 
   // For each syscall in our table, calculate the kernel address
   for (const auto &[name, syscall_num] : syscall_numbers_24h2) {
-    // Read the 4-byte relative offset from KiServiceTable
-    std::int32_t relative_offset = 0;
-    hypercall::read_guest_virtual_memory(
-        &relative_offset, ki_service_table + (syscall_num * 4),
-        sys::current_cr3, sizeof(std::int32_t));
+    // Read the 4-byte SSDT entry from KiServiceTable
+    std::int32_t ssdt_entry = 0;
+    std::uint64_t entry_addr =
+        ki_service_table + (static_cast<std::uint64_t>(syscall_num) * 4);
 
-    if (relative_offset == 0) {
+    hypercall::read_guest_virtual_memory(
+        &ssdt_entry, entry_addr, sys::current_cr3, sizeof(std::int32_t));
+
+    if (ssdt_entry == 0) {
+      syscalls_failed++;
       continue;
     }
 
-    // On x64, the offset is stored with argument count in low 4 bits
-    // Real offset = (table_entry >> 4)
-    std::uint64_t kernel_address = ki_service_table + (relative_offset >> 4);
+    // On x64, SSDT entry format:
+    // Bits [31:4] = Signed offset from KiServiceTable to function
+    // Bits [3:0]  = Number of arguments (for stack cleanup)
+    // Formula: function_address = KiServiceTable + (ssdt_entry >> 4)
+
+    // The right shift of a signed integer preserves the sign (arithmetic shift)
+    std::int32_t offset = ssdt_entry >> 4;
+
+    // Calculate the kernel function address
+    // Note: offset is signed, so we need to handle negative offsets
+    std::int64_t signed_offset = static_cast<std::int64_t>(offset);
+    std::uint64_t kernel_address = static_cast<std::uint64_t>(
+        static_cast<std::int64_t>(ki_service_table) + signed_offset);
+
+    // Validate the resolved address
+    if (!validate_syscall_address(kernel_address, ntoskrnl)) {
+      syscalls_failed++;
+      continue;
+    }
 
     // Add to exports with both plain name and prefixed name
     ntoskrnl.exports[name] = kernel_address;
     ntoskrnl.exports["ntoskrnl.exe!" + name] = kernel_address;
 
-    // Also add Zw* variant (they point to same address)
+    // Also add Zw* variant (they point to same address in kernel)
     if (name.size() >= 2 && name.compare(0, 2, "Nt") == 0) {
       std::string zw_name = "Zw" + name.substr(2);
       ntoskrnl.exports[zw_name] = kernel_address;
@@ -361,6 +494,12 @@ std::uint64_t resolve_syscalls_to_exports(sys::kernel_module_t &ntoskrnl) {
     }
 
     syscalls_resolved++;
+  }
+
+  if (syscalls_failed > 0) {
+    std::println("    [!] {} syscalls failed validation (may be system version "
+                 "mismatch)",
+                 syscalls_failed);
   }
 
   return syscalls_resolved;
