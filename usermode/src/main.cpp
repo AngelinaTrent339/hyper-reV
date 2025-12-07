@@ -18,8 +18,26 @@ void enable_ansi_colors() {
   SetConsoleMode(hOut, dwMode);
 }
 
+void enable_utf8_console() {
+  // Set console output to UTF-8 for proper Unicode box-drawing characters
+  SetConsoleOutputCP(CP_UTF8);
+  SetConsoleCP(CP_UTF8);
+
+  // Also set the console font to one that supports Unicode if possible
+  CONSOLE_FONT_INFOEX cfi = {};
+  cfi.cbSize = sizeof(cfi);
+  cfi.nFont = 0;
+  cfi.dwFontSize.X = 0;
+  cfi.dwFontSize.Y = 16;
+  cfi.FontFamily = FF_DONTCARE;
+  cfi.FontWeight = FW_NORMAL;
+  wcscpy_s(cfi.FaceName, L"Consolas");
+  SetCurrentConsoleFontEx(GetStdHandle(STD_OUTPUT_HANDLE), FALSE, &cfi);
+}
+
 std::int32_t main() {
   enable_ansi_colors();
+  enable_utf8_console();
 
   if (sys::set_up() == 0) {
     std::system("pause");
