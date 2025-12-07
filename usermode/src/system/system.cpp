@@ -244,13 +244,13 @@ std::uint64_t resolve_syscalls_to_exports(sys::kernel_module_t &ntoskrnl) {
   // KeServiceDescriptorTable is NOT exported on x64 Windows
   // We need to pattern scan for it inside ntoskrnl
 
-  // Pattern: LEA r10, [KeServiceDescriptorTableShadow] = 4C 8D 15 XX XX XX XX
-  // This pattern is used in KiSystemServiceRepeat
-  const std::uint8_t pattern[] = {0x4C, 0x8D, 0x15}; // lea r10, [rip+XXX]
-  const std::uint64_t pattern_size = sizeof(pattern);
+  // Pattern: LEA r11, [KeServiceDescriptorTable] = 4C 8D 1D XX XX XX XX
+  // This is in KiSystemServiceRepeat and points directly to the SSDT
+  const std::uint8_t pattern1[] = {0x4C, 0x8D, 0x1D}; // lea r11, [rip+XXX]
+  const std::uint8_t pattern2[] = {0x4C, 0x8D,
+                                   0x15}; // lea r10, [rip+XXX] (shadow)
 
   // Read ntoskrnl .text section to find the pattern
-  // We'll scan a reasonable range from the base
   constexpr std::uint64_t scan_size = 0x800000; // 8MB should cover .text
   std::vector<std::uint8_t> ntoskrnl_bytes(scan_size);
 
@@ -260,31 +260,66 @@ std::uint64_t resolve_syscalls_to_exports(sys::kernel_module_t &ntoskrnl) {
 
   std::uint64_t ki_service_table = 0;
 
-  // Scan for the pattern
-  for (std::uint64_t i = 0; i < scan_size - 16; i++) {
-    if (ntoskrnl_bytes[i] == pattern[0] &&
-        ntoskrnl_bytes[i + 1] == pattern[1] &&
-        ntoskrnl_bytes[i + 2] == pattern[2]) {
+  // Scan for the pattern - try both patterns
+  for (int pattern_idx = 0; pattern_idx < 2 && ki_service_table == 0;
+       pattern_idx++) {
+    const std::uint8_t *pattern = (pattern_idx == 0) ? pattern1 : pattern2;
 
-      // Found potential match - extract the RIP-relative offset
-      std::int32_t rip_offset =
-          *reinterpret_cast<std::int32_t *>(&ntoskrnl_bytes[i + 3]);
+    for (std::uint64_t i = 0; i < scan_size - 16; i++) {
+      if (ntoskrnl_bytes[i] == pattern[0] &&
+          ntoskrnl_bytes[i + 1] == pattern[1] &&
+          ntoskrnl_bytes[i + 2] == pattern[2]) {
 
-      // Calculate the actual address: RIP + offset + instruction_size(7)
-      std::uint64_t instruction_addr = ntoskrnl.base_address + i;
-      std::uint64_t target_addr = instruction_addr + 7 + rip_offset;
+        // Found potential match - extract the RIP-relative offset
+        std::int32_t rip_offset =
+            *reinterpret_cast<std::int32_t *>(&ntoskrnl_bytes[i + 3]);
 
-      // Verify this looks like a valid kernel address
-      if ((target_addr >> 48) == 0xFFFF &&
-          target_addr > ntoskrnl.base_address) {
-        // Read the first QWORD from the target to get KiServiceTable
+        // Calculate the actual address: RIP + offset + instruction_size(7)
+        std::uint64_t instruction_addr = ntoskrnl.base_address + i;
+        std::uint64_t target_addr = instruction_addr + 7 + rip_offset;
+
+        // Target must be within ntoskrnl and look like kernel address
+        if ((target_addr >> 48) != 0xFFFF)
+          continue;
+        if (target_addr < ntoskrnl.base_address)
+          continue;
+        if (target_addr > ntoskrnl.base_address + ntoskrnl.size + 0x1000000)
+          continue;
+
+        // Read the first QWORD from the target to get KiServiceTable pointer
         std::uint64_t potential_table = 0;
         hypercall::read_guest_virtual_memory(&potential_table, target_addr,
                                              sys::current_cr3,
                                              sizeof(std::uint64_t));
 
-        // Verify it's a valid kernel pointer
-        if ((potential_table >> 48) == 0xFFFF) {
+        // Verify it's a valid kernel pointer (code section address)
+        if ((potential_table >> 48) != 0xFFFF)
+          continue;
+        if (potential_table < ntoskrnl.base_address)
+          continue;
+        if (potential_table > ntoskrnl.base_address + ntoskrnl.size)
+          continue;
+
+        // Validate: read first few SSDT entries and check they look valid
+        // SSDT entries on x64 are 4-byte relative offsets with arg count in low
+        // 4 bits
+        std::int32_t test_entries[4] = {0};
+        hypercall::read_guest_virtual_memory(test_entries, potential_table,
+                                             sys::current_cr3,
+                                             sizeof(test_entries));
+
+        // All test entries should be positive and within reasonable range (<
+        // 16MB offset)
+        bool valid = true;
+        for (int j = 0; j < 4; j++) {
+          std::int32_t offset = test_entries[j] >> 4; // Remove arg count bits
+          if (offset < 0 || offset > 0x1000000) {
+            valid = false;
+            break;
+          }
+        }
+
+        if (valid) {
           ki_service_table = potential_table;
           break;
         }
