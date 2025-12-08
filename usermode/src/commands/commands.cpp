@@ -1063,8 +1063,11 @@ void process_track(CLI::App *track) {
         console::success(
             "CR3 captured! You can now use this CR3 for memory operations.");
         std::println("");
-        console::info(std::format("Example: rgvm <address> 0x{:X} <size>",
-                                  status.tracked_cr3));
+        console::info("Examples:");
+        std::println("  dump <address> <size> --cr3 0x{:X}",
+                     status.tracked_cr3);
+        std::println("  rgvm <address> 0x{:X} <1-8>  (read single value)",
+                     status.tracked_cr3);
       } else {
         std::println("  {}Captured CR3{}:   (not yet captured)",
                      console::color::yellow, console::color::reset);
