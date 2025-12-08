@@ -646,6 +646,18 @@ void hypercall::process(const hypercall_info_t hypercall_info,
     trap_frame->rax = 1;
     break;
   }
+  case hypercall_type_t::read_msr_value: {
+    // rdx = MSR index
+    // Returns the value guest would see (shadow if exists)
+    const std::uint32_t msr_index = static_cast<std::uint32_t>(trap_frame->rdx);
+    trap_frame->rax = msr_shadow::read_msr_for_guest(msr_index);
+    break;
+  }
+  case hypercall_type_t::get_msr_intercept_count: {
+    // Returns the count of MSR intercepts that returned shadow values
+    trap_frame->rax = msr_shadow::get_intercept_count();
+    break;
+  }
   default:
     break;
   }

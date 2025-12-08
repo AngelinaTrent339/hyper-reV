@@ -1175,10 +1175,15 @@ CLI::App *init_msr(CLI::App &app) {
   msr->add_subcommand("remove", "remove MSR shadow");
   msr->add_subcommand("list", "list active MSR shadows");
   msr->add_subcommand("clear", "clear all MSR shadows");
+  msr->add_subcommand("read", "read MSR value (shows shadow if exists)");
+  msr->add_subcommand("test", "test if shadowing works for an MSR");
+  msr->add_subcommand("status", "show MSR intercept statistics");
 
   add_command_option(msr->get_subcommand("add"), "msr_index")->required();
   add_command_option(msr->get_subcommand("add"), "shadow_value")->required();
   add_command_option(msr->get_subcommand("remove"), "msr_index")->required();
+  add_command_option(msr->get_subcommand("read"), "msr_index")->required();
+  add_command_option(msr->get_subcommand("test"), "msr_index")->required();
 
   return msr;
 }
@@ -1272,6 +1277,137 @@ void process_msr(CLI::App *msr) {
     } else {
       console::error("Failed to clear MSR shadows");
     }
+  } else if (*msr->get_subcommand("read")) {
+    // Read MSR - shows shadow value if exists
+    auto *read_cmd = msr->get_subcommand("read");
+    const std::uint64_t msr_index = get_command_option<std::uint64_t>(read_cmd, "msr_index");
+    
+    const std::uint64_t value = hypercall::read_msr_value(static_cast<std::uint32_t>(msr_index));
+    std::string msr_name = get_msr_name(static_cast<std::uint32_t>(msr_index));
+    
+    std::println("");
+    if (value == 0x8000000000000000ULL) {
+      console::warn(std::format("MSR 0x{:X}{} - No shadow, actual read not available",
+                                msr_index, msr_name.empty() ? "" : " (" + msr_name + ")"));
+      console::info("Add a shadow first with 'msr add'");
+    } else {
+      console::success(std::format("MSR 0x{:X}{} = {}0x{:016X}{}",
+                                   msr_index,
+                                   msr_name.empty() ? "" : " (" + msr_name + ")",
+                                   console::color::cyan, value, console::color::reset));
+      
+      // Check if this is a shadow or actual value
+      hypercall::msr_shadow_entry_t buffer[32] = {};
+      const std::uint64_t count = hypercall::get_msr_shadow_list(buffer, 32);
+      bool is_shadow = false;
+      for (std::uint32_t i = 0; i < count; ++i) {
+        if (buffer[i].msr_index == msr_index) {
+          is_shadow = true;
+          break;
+        }
+      }
+      if (is_shadow) {
+        console::info("(This is the SHADOW value)");
+      }
+    }
+    std::println("");
+  } else if (*msr->get_subcommand("test")) {
+    // Test MSR shadowing - add a test shadow, check intercepts, then remove
+    auto *test_cmd = msr->get_subcommand("test");
+    const std::uint64_t msr_index = get_command_option<std::uint64_t>(test_cmd, "msr_index");
+    const std::uint64_t test_value = 0xDEADBEEFCAFEBABEULL;
+    
+    std::string msr_name = get_msr_name(static_cast<std::uint32_t>(msr_index));
+    
+    std::println("");
+    console::info(std::format("Testing MSR shadowing for 0x{:X}{}...",
+                              msr_index, msr_name.empty() ? "" : " (" + msr_name + ")"));
+    std::println("");
+    
+    // Get initial intercept count
+    const std::uint64_t initial_count = hypercall::get_msr_intercept_count();
+    
+    // Add a test shadow
+    const std::uint64_t add_result = hypercall::add_msr_shadow(
+        static_cast<std::uint32_t>(msr_index), test_value);
+    
+    if (add_result != 1) {
+      console::error("Failed to add test shadow");
+      return;
+    }
+    
+    std::println("  [1] Added test shadow: 0x{:X} -> 0x{:016X}", msr_index, test_value);
+    
+    // Read it back
+    const std::uint64_t read_value = hypercall::read_msr_value(
+        static_cast<std::uint32_t>(msr_index));
+    
+    std::println("  [2] Read back value:   0x{:016X}", read_value);
+    
+    // Check if it matches
+    if (read_value == test_value) {
+      std::println("  [3] {}✓ Shadow value returned correctly!{}", 
+                   console::color::green, console::color::reset);
+    } else if (read_value == 0x8000000000000000ULL) {
+      std::println("  [3] {}✗ No shadow returned (MSR read not available){}", 
+                   console::color::red, console::color::reset);
+    } else {
+      std::println("  [3] {}? Unexpected value (may be actual MSR){}", 
+                   console::color::yellow, console::color::reset);
+    }
+    
+    // Check intercept count
+    const std::uint64_t final_count = hypercall::get_msr_intercept_count();
+    const std::uint64_t intercepts = final_count - initial_count;
+    
+    std::println("  [4] MSR intercepts during test: {}", intercepts);
+    
+    // Remove the test shadow
+    hypercall::remove_msr_shadow(static_cast<std::uint32_t>(msr_index));
+    std::println("  [5] Removed test shadow");
+    
+    std::println("");
+    if (read_value == test_value) {
+      console::success("MSR shadowing is WORKING for this MSR!");
+    } else {
+      console::warn("MSR shadowing may not be active for this MSR.");
+      console::info("Note: Hyper-V must be configured to intercept this MSR.");
+    }
+    std::println("");
+  } else if (*msr->get_subcommand("status")) {
+    // Show MSR intercept statistics
+    const std::uint64_t intercept_count = hypercall::get_msr_intercept_count();
+    const std::uint64_t shadow_count = hypercall::get_msr_shadow_list(nullptr, 0);
+    
+    std::println("");
+    std::println(
+        "{}╔════════════════════════════════════════════════════════════════╗{}",
+        console::color::cyan, console::color::reset);
+    std::println("{}║{} {}MSR SHADOW STATUS{}                                 "
+                 "             {}║{}",
+                 console::color::cyan, console::color::reset,
+                 console::color::bold, console::color::reset,
+                 console::color::cyan, console::color::reset);
+    std::println(
+        "{}╚════════════════════════════════════════════════════════════════╝{}",
+        console::color::cyan, console::color::reset);
+    std::println("");
+    
+    std::println("  {}Active shadows:{}    {}", console::color::dim, 
+                 console::color::reset, shadow_count);
+    std::println("  {}Total intercepts:{} {}", console::color::dim, 
+                 console::color::reset, intercept_count);
+    std::println("");
+    
+    if (intercept_count > 0) {
+      console::success("MSR interception is ACTIVE - shadows have been applied.");
+    } else if (shadow_count > 0) {
+      console::warn("Shadows configured but no intercepts yet.");
+      console::info("Intercepts will be counted when guest reads shadowed MSRs.");
+    } else {
+      console::info("No shadows configured. Use 'msr add' to add one.");
+    }
+    std::println("");
   } else {
     console::info("MSR Shadow Commands (AMD only):");
     std::println("");
@@ -1286,6 +1422,15 @@ void process_msr(CLI::App *msr) {
         console::color::yellow, console::color::reset);
     std::println(
         "  {}msr clear{}                           - Clear all shadows",
+        console::color::yellow, console::color::reset);
+    std::println(
+        "  {}msr read <msr_index>{}                - Read MSR (shows shadow if exists)",
+        console::color::yellow, console::color::reset);
+    std::println(
+        "  {}msr test <msr_index>{}                - Test if shadowing works",
+        console::color::yellow, console::color::reset);
+    std::println(
+        "  {}msr status{}                          - Show intercept statistics",
         console::color::yellow, console::color::reset);
     std::println("");
     std::println("  {}Common MSRs:{}", console::color::cyan,

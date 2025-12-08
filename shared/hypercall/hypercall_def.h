@@ -19,10 +19,12 @@ enum class hypercall_type_t : std::uint64_t {
   clear_tracked_pid,   // Clear the tracked PID and CR3
   get_tracking_status, // Get tracking status (PID, CR3, and match count)
   // MSR Shadowing (AMD only)
-  add_msr_shadow,       // Add/update MSR shadow: rdx=msr_index, r8=shadow_value
-  remove_msr_shadow,    // Remove MSR shadow: rdx=msr_index
-  get_msr_shadow_list,  // Get list of active shadows: r8=output_buffer
-  clear_all_msr_shadows // Clear all MSR shadows
+  add_msr_shadow,      // Add/update MSR shadow: rdx=msr_index, r8=shadow_value
+  remove_msr_shadow,   // Remove MSR shadow: rdx=msr_index
+  get_msr_shadow_list, // Get list of active shadows: r8=output_buffer
+  clear_all_msr_shadows, // Clear all MSR shadows
+  read_msr_value, // Read MSR value (returns shadow if exists): rdx=msr_index
+  get_msr_intercept_count // Get count of MSR intercepts caught (debug)
 };
 
 #pragma warning(push)

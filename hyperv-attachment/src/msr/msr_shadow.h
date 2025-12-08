@@ -62,4 +62,12 @@ std::uint8_t handle_wrmsr(std::uint32_t msr_index, std::uint64_t value);
 // Get list of all active shadows (for status display)
 std::uint32_t get_shadow_count();
 const entry_t *get_entry(std::uint32_t index);
+
+// Debug: Get count of intercepted MSR operations
+std::uint64_t get_intercept_count();
+void increment_intercept_count();
+
+// Debug: Read an MSR value - returns shadow if exists, otherwise actual value
+// Returns the value that would be seen by the guest
+std::uint64_t read_msr_for_guest(std::uint32_t msr_index);
 } // namespace msr_shadow

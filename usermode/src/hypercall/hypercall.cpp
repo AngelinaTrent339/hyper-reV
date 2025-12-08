@@ -207,3 +207,15 @@ std::uint64_t hypercall::clear_all_msr_shadows() {
 
   return make_hypercall(call_type, 0, 0, 0, 0);
 }
+
+std::uint64_t hypercall::read_msr_value(std::uint32_t msr_index) {
+  hypercall_type_t call_type = hypercall_type_t::read_msr_value;
+
+  return make_hypercall(call_type, 0, msr_index, 0, 0);
+}
+
+std::uint64_t hypercall::get_msr_intercept_count() {
+  hypercall_type_t call_type = hypercall_type_t::get_msr_intercept_count;
+
+  return make_hypercall(call_type, 0, 0, 0, 0);
+}

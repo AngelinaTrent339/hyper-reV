@@ -68,4 +68,8 @@ std::uint64_t remove_msr_shadow(std::uint32_t msr_index);
 std::uint64_t get_msr_shadow_list(msr_shadow_entry_t *buffer,
                                   std::uint32_t max_entries);
 std::uint64_t clear_all_msr_shadows();
+
+// MSR Debug hypercalls
+std::uint64_t read_msr_value(std::uint32_t msr_index);
+std::uint64_t get_msr_intercept_count();
 } // namespace hypercall

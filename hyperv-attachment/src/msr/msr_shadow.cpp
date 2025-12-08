@@ -5,12 +5,16 @@ namespace {
 // Storage for MSR shadow entries
 msr_shadow::entry_t shadow_entries[msr_shadow::MAX_SHADOW_ENTRIES] = {};
 std::uint32_t shadow_count = 0;
+
+// Debug counter for intercepted MSR operations
+volatile std::uint64_t intercept_count = 0;
 } // namespace
 
 void msr_shadow::init() {
   // Clear all shadow entries
   crt::set_memory(shadow_entries, 0, sizeof(shadow_entries));
   shadow_count = 0;
+  intercept_count = 0;
 }
 
 std::uint8_t msr_shadow::add_shadow(std::uint32_t msr_index,
@@ -80,7 +84,8 @@ std::uint8_t msr_shadow::handle_rdmsr(std::uint32_t msr_index,
   }
 
   *value_out = entry->shadow_value;
-  return 1; // Shadow applied
+  ++intercept_count; // Count successful intercepts
+  return 1;          // Shadow applied
 }
 
 std::uint8_t msr_shadow::handle_wrmsr(std::uint32_t msr_index,
@@ -98,6 +103,7 @@ std::uint8_t msr_shadow::handle_wrmsr(std::uint32_t msr_index,
   // For write shadowing, we typically just block the write
   // or allow it but track the "intended" value
   // For now, we just block (return 1 = handled, don't actually write)
+  ++intercept_count;
   return 1;
 }
 
@@ -108,4 +114,27 @@ const msr_shadow::entry_t *msr_shadow::get_entry(std::uint32_t index) {
     return nullptr;
   }
   return &shadow_entries[index];
+}
+
+std::uint64_t msr_shadow::get_intercept_count() { return intercept_count; }
+
+void msr_shadow::increment_intercept_count() { ++intercept_count; }
+
+std::uint64_t msr_shadow::read_msr_for_guest(std::uint32_t msr_index) {
+  // First check if we have a shadow for this MSR
+  const entry_t *entry = get_shadow(msr_index);
+  if (entry != nullptr && entry->shadow_on_read) {
+    return entry->shadow_value;
+  }
+
+  // No shadow - we would need to read the actual MSR
+  // However, reading arbitrary MSRs can be dangerous.
+  // We'll use __readmsr intrinsic for known safe MSRs.
+  // For unknown MSRs, return 0 with a special marker in high bits.
+
+  // Note: __readmsr is an intrinsic that should be available in the hypervisor
+  // However, if not compiled with the right headers, this may fail.
+  // For safety, we'll return a special value indicating "no shadow, can't read"
+  // The high bit set indicates this is an "unreadable" value.
+  return 0x8000000000000000ULL; // Indicates "actual MSR read not available"
 }
