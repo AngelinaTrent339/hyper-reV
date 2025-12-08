@@ -13,6 +13,7 @@
 #include "slat/cr3/cr3.h"
 #include "slat/slat.h"
 #include "slat/violation/violation.h"
+#include "syscall/syscall_intercept.h"
 
 #include <intrin.h>
 
@@ -199,5 +200,6 @@ void entry_point(std::uint8_t **const vmexit_handler_detour_out,
   heap_manager::set_up(mapped_heap_usable_base, heap_usable_size);
 
   logs::set_up();
+  syscall_intercept::initialize();
   slat::set_up();
 }

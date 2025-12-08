@@ -9,6 +9,7 @@
 #include "../arch/arch.h"
 #include "../crt/crt.h"
 #include "../logs/logs.h"
+#include "../syscall/syscall_intercept.h"
 
 #include <hypercall/hypercall_def.h>
 #include <ia32-doc/ia32.hpp>
@@ -365,16 +366,15 @@ void hypercall::process(const hypercall_info_t hypercall_info,
   // HYPERVISOR-LEVEL SYSCALL INTERCEPTION (No SSDT needed!)
   // ============================================================================
   case hypercall_type_t::enable_syscall_intercept: {
-    // RDX = mode (0 = log_all, 1 = log_filtered)
-    // Returns: 1 on success, 0 on failure
-    // TODO: Implement syscall interception enable
-    // For now, we'll use NPT hook on LSTAR/KiSystemCall64
+    // RDX = mode (0 = disabled, 1 = log_all, 2 = log_filtered)
+    syscall_intercept::filter_mode_t mode =
+        static_cast<syscall_intercept::filter_mode_t>(trap_frame->rdx);
+    syscall_intercept::set_mode(mode);
     trap_frame->rax = 1;
     break;
   }
   case hypercall_type_t::disable_syscall_intercept: {
-    // Disable syscall interception
-    // TODO: Remove NPT hooks on syscall entry points
+    syscall_intercept::set_mode(syscall_intercept::filter_mode_t::disabled);
     trap_frame->rax = 1;
     break;
   }
@@ -382,7 +382,8 @@ void hypercall::process(const hypercall_info_t hypercall_info,
     // RDX = syscall_min
     // R8 = syscall_max
     // R9 = cr3_filter (0 = all processes)
-    // TODO: Apply filter settings
+    syscall_intercept::set_filter(trap_frame->rdx, trap_frame->r8,
+                                  trap_frame->r9);
     trap_frame->rax = 1;
     break;
   }
@@ -390,14 +391,28 @@ void hypercall::process(const hypercall_info_t hypercall_info,
     // RDX = guest buffer virtual address
     // R8 = max entries to copy
     // Returns: number of entries copied
-    // TODO: Implement syscall log flush
-    trap_frame->rax = 0;
+    const cr3 guest_cr3 = arch::get_guest_cr3();
+    const cr3 slat_cr3 = slat::hyperv_cr3();
+
+    const virtual_address_t guest_buffer_va = {.address = trap_frame->rdx};
+    const std::uint64_t max_entries = trap_frame->r8;
+
+    // Translate guest VA to physical
+    const std::uint64_t guest_buffer_pa =
+        memory_manager::translate_guest_virtual_address(guest_cr3, slat_cr3,
+                                                        guest_buffer_va);
+
+    if (guest_buffer_pa != 0) {
+      void *host_ptr = memory_manager::translate_to_host_address(
+          {.address = guest_buffer_pa});
+      trap_frame->rax = syscall_intercept::flush_logs(host_ptr, max_entries);
+    } else {
+      trap_frame->rax = 0;
+    }
     break;
   }
   case hypercall_type_t::get_syscall_log_count: {
-    // Returns: number of pending syscall log entries
-    // TODO: Return actual count
-    trap_frame->rax = 0;
+    trap_frame->rax = syscall_intercept::get_log_count();
     break;
   }
   case hypercall_type_t::hook_lstar: {
