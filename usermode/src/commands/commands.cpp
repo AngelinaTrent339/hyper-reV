@@ -1304,6 +1304,178 @@ std::uint64_t find_ki_system_call64() {
 }
 } // namespace process_monitor
 
+CLI::App *init_monitor(CLI::App &app) {
+  CLI::App *monitor_cmd =
+      app.add_subcommand("monitor", "monitor syscalls from a specific process")
+          ->ignore_case();
+
+  add_command_option(monitor_cmd, "process_name");
+  monitor_cmd->add_subcommand("stop", "stop monitoring");
+  monitor_cmd->add_subcommand("logs", "view captured syscalls");
+  monitor_cmd->add_subcommand("status", "show monitor status");
+
+  return monitor_cmd;
+}
+
+void process_monitor_cmd(CLI::App *monitor_cmd) {
+  auto stop_cmd = monitor_cmd->get_subcommand("stop");
+  auto logs_cmd = monitor_cmd->get_subcommand("logs");
+  auto status_cmd = monitor_cmd->get_subcommand("status");
+
+  if (*stop_cmd) {
+    if (!process_monitor::is_monitoring) {
+      console::info("Not monitoring");
+      return;
+    }
+
+    // Remove the hook
+    if (process_monitor::ki_syscall_hook_addr != 0) {
+      hook::remove_kernel_hook(process_monitor::ki_syscall_hook_addr, 1);
+    }
+
+    process_monitor::is_monitoring = false;
+    process_monitor::target_cr3 = 0;
+    process_monitor::target_process = "";
+    process_monitor::ki_syscall_hook_addr = 0;
+
+    console::success("Stopped monitoring");
+  } else if (*logs_cmd) {
+    constexpr std::uint64_t log_count = 100;
+    std::vector<trap_frame_log_t> logs(log_count);
+    std::uint64_t n = hypercall::flush_logs(logs);
+
+    if (n == static_cast<std::uint64_t>(-1) || n == 0) {
+      console::info("No logs captured yet");
+      return;
+    }
+
+    console::separator(
+        std::format("Syscalls from {}", process_monitor::target_process.empty()
+                                            ? "ALL"
+                                            : process_monitor::target_process));
+
+    std::uint64_t shown = 0;
+    for (std::uint64_t i = 0; i < n; i++) {
+      const auto &l = logs[i];
+
+      // Filter by CR3 if we have a target
+      if (process_monitor::target_cr3 != 0 &&
+          l.cr3 != process_monitor::target_cr3) {
+        continue;
+      }
+
+      std::println("  [{}] RAX={:#x} RCX={:#x} RDX={:#x} R8={:#x}", shown++,
+                   l.rax, l.rcx, l.rdx, l.r8);
+      std::println("       RIP={:#x} RSP={:#x} CR3={:#x}", l.rip, l.rsp, l.cr3);
+    }
+
+    if (shown == 0) {
+      console::info("No syscalls from target process captured");
+    } else {
+      std::println("\n  Showed {} of {} total syscalls", shown, n);
+    }
+    console::separator();
+  } else if (*status_cmd) {
+    console::separator("Process Monitor Status");
+    if (process_monitor::is_monitoring) {
+      console::print_value("Status", "MONITORING");
+      console::print_value("Process", process_monitor::target_process);
+      console::print_value("Target CR3", process_monitor::target_cr3);
+      console::print_value("Hook Address",
+                           process_monitor::ki_syscall_hook_addr);
+    } else {
+      console::print_value("Status", "STOPPED");
+    }
+    console::separator();
+  } else {
+    // Start monitoring
+    std::string process_name =
+        get_command_option<std::string>(monitor_cmd, "process_name");
+
+    if (process_name.empty()) {
+      std::println("\n{}Process Monitor:{}", console::color::bold,
+                   console::color::reset);
+      std::println("  {}monitor <process.exe>{}  - Start monitoring syscalls "
+                   "from process",
+                   console::color::green, console::color::reset);
+      std::println("  {}monitor stop{}           - Stop monitoring",
+                   console::color::green, console::color::reset);
+      std::println("  {}monitor logs{}           - View captured syscalls",
+                   console::color::green, console::color::reset);
+      std::println("  {}monitor status{}         - Show monitor status",
+                   console::color::green, console::color::reset);
+      std::println("\n{}Example:{}", console::color::dim,
+                   console::color::reset);
+      std::println("  monitor notepad.exe");
+      std::println("  monitor logs");
+      std::println("  monitor stop");
+      return;
+    }
+
+    if (process_monitor::is_monitoring) {
+      console::warn(
+          std::format("Already monitoring {}. Use 'monitor stop' first.",
+                      process_monitor::target_process));
+      return;
+    }
+
+    console::info(std::format("Starting to monitor '{}'...", process_name));
+
+    // Find the process CR3
+    std::uint64_t cr3 = process_monitor::find_process_cr3(process_name);
+
+    // Even if CR3 is 0, we can still monitor (just won't filter)
+    process_monitor::target_cr3 = cr3;
+    process_monitor::target_process = process_name;
+
+    // Find and hook KiSystemCall64
+    std::uint64_t ki_syscall = process_monitor::find_ki_system_call64();
+    if (ki_syscall == 0) {
+      console::error("Failed to find KiSystemCall64");
+      return;
+    }
+
+    // Create logging hook
+    hypercall_info_t hc = {};
+    hc.primary_key = hypercall_primary_key;
+    hc.secondary_key = hypercall_secondary_key;
+    hc.call_type = hypercall_type_t::log_current_state;
+
+    std::vector<std::uint8_t> pre_asm = {
+        0x51,                         // push rcx
+        0xB9, 0x00, 0x00, 0x00, 0x00, // mov ecx, <magic>
+        0x0F, 0xA2,                   // cpuid
+        0x59,                         // pop rcx
+    };
+    *reinterpret_cast<std::uint32_t *>(&pre_asm[2]) =
+        static_cast<std::uint32_t>(hc.value);
+
+    std::vector<std::uint8_t> post_asm;
+
+    std::uint8_t result = hook::add_kernel_hook(ki_syscall, pre_asm, post_asm);
+
+    if (result == 0) {
+      console::error("Failed to hook KiSystemCall64");
+      return;
+    }
+
+    process_monitor::ki_syscall_hook_addr = ki_syscall;
+    process_monitor::is_monitoring = true;
+
+    console::success(
+        std::format("Monitoring syscalls from '{}'", process_name));
+    if (cr3 == 0) {
+      console::warn("Could not find process CR3 - logging ALL syscalls");
+      console::info(
+          "Trigger activity in the target process, then use 'monitor logs'");
+    } else {
+      console::info(std::format("Filtering by CR3: {:#x}", cr3));
+      console::info("Use 'monitor logs' to see captured syscalls");
+    }
+    console::warn("Use 'monitor stop' before exiting!");
+  }
+}
+
 // ============================================================================
 // HYPERVISOR-LEVEL SYSCALL INTERCEPTION (SELECTIVE)
 // ============================================================================
@@ -1586,145 +1758,6 @@ void process_syscall_cmd(CLI::App *syscall_cmd) {
     std::println("  syscall hook NtOpenProcess --monitor");
     std::println("  syscall logs");
   }
-}
-
-// ============================================================================
-// SIMPLE MONITOR COMMAND
-// Usage: monitor <process.exe>  - Start monitoring all syscalls from process
-//        monitor stop           - Stop monitoring
-//        logs                   - View captured syscalls (existing command)
-// ============================================================================
-
-CLI::App *init_monitor(CLI::App &app) {
-  CLI::App *monitor_cmd =
-      app.add_subcommand("monitor", "Simple process syscall monitoring")
-          ->ignore_case();
-
-  add_command_option(monitor_cmd, "target");
-
-  return monitor_cmd;
-}
-
-void process_monitor_cmd(CLI::App *monitor_cmd) {
-  if (!*monitor_cmd)
-    return;
-
-  std::string target = get_command_option<std::string>(monitor_cmd, "target");
-
-  if (target.empty()) {
-    // Show help
-    console::separator("Process Monitor");
-    std::println("{}Usage:{}", console::color::bold, console::color::reset);
-    std::println("  {}monitor <process.exe>{}  - Start monitoring",
-                 console::color::green, console::color::reset);
-    std::println("  {}monitor stop{}          - Stop monitoring",
-                 console::color::green, console::color::reset);
-    std::println("  {}logs{}                  - View captured syscalls",
-                 console::color::green, console::color::reset);
-
-    std::println("\n{}Status:{}", console::color::bold, console::color::reset);
-    if (process_monitor::is_monitoring) {
-      std::println("  Monitoring: {} (CR3: {:#x})",
-                   process_monitor::target_process,
-                   process_monitor::target_cr3);
-    } else {
-      std::println("  Not monitoring");
-    }
-    console::separator();
-    return;
-  }
-
-  // Handle "stop" command
-  if (target == "stop" || target == "off" || target == "disable") {
-    if (!process_monitor::is_monitoring) {
-      console::warn("Not currently monitoring");
-      return;
-    }
-
-    // Remove the KiSystemCall64 hook
-    if (process_monitor::ki_syscall_hook_addr != 0) {
-      hook::remove_kernel_hook(process_monitor::ki_syscall_hook_addr, 1);
-    }
-
-    // Disable syscall intercept
-    hypercall::disable_syscall_intercept();
-
-    process_monitor::is_monitoring = false;
-    process_monitor::target_process = "";
-    process_monitor::target_cr3 = 0;
-    process_monitor::ki_syscall_hook_addr = 0;
-
-    console::success("Monitoring stopped");
-    return;
-  }
-
-  // Start monitoring a process
-  if (process_monitor::is_monitoring) {
-    console::warn(
-        std::format("Already monitoring {}. Use 'monitor stop' first.",
-                    process_monitor::target_process));
-    return;
-  }
-
-  console::info(std::format("Setting up monitoring for: {}", target));
-
-  // Find KiSystemCall64
-  std::uint64_t ki_addr = process_monitor::find_ki_system_call64();
-  if (ki_addr == 0) {
-    console::error("Failed to find KiSystemCall64");
-    return;
-  }
-
-  // Look up process and get CR3 for filtering
-  std::uint64_t target_cr3 = process_monitor::find_process_cr3(target);
-  process_monitor::target_cr3 = target_cr3;
-
-  // Build monitor code (same as hook --monitor)
-  hypercall_info_t hc = {};
-  hc.primary_key = hypercall_primary_key;
-  hc.secondary_key = hypercall_secondary_key;
-  hc.call_type = hypercall_type_t::log_current_state;
-
-  std::vector<std::uint8_t> pre_asm = {
-      0x51,                         // push rcx
-      0xB9, 0x00, 0x00, 0x00, 0x00, // mov ecx, <magic>
-      0x0F, 0xA2,                   // cpuid
-      0x59,                         // pop rcx
-  };
-  *reinterpret_cast<std::uint32_t *>(&pre_asm[2]) =
-      static_cast<std::uint32_t>(hc.value);
-
-  std::vector<std::uint8_t> post_asm; // Empty
-
-  // Hook KiSystemCall64
-  std::uint8_t result = hook::add_kernel_hook(ki_addr, pre_asm, post_asm);
-
-  if (result == 0) {
-    console::error("Failed to hook KiSystemCall64");
-    return;
-  }
-
-  // Set up syscall filtering
-  if (target_cr3 != 0) {
-    // Enable filtered mode with process CR3
-    hypercall::set_syscall_filter(0, 0xFFFFFFFF,
-                                  target_cr3); // All syscalls, from this CR3
-    hypercall::enable_syscall_intercept(2);    // Mode 2 = log_filtered
-    console::info(
-        std::format("Filtering syscalls from CR3: {:#x}", target_cr3));
-  } else {
-    // No CR3 filter - log all syscalls (might be spammy)
-    hypercall::enable_syscall_intercept(1); // Mode 1 = log_all
-    console::warn("No CR3 filter - logging ALL syscalls (may be spammy)");
-  }
-
-  process_monitor::is_monitoring = true;
-  process_monitor::target_process = target;
-  process_monitor::ki_syscall_hook_addr = ki_addr;
-
-  console::success(std::format("Monitoring started for: {}", target));
-  console::info("Use 'logs' to view captured syscalls");
-  console::warn("Use 'monitor stop' to stop (prevents BSOD on exit)");
 }
 
 // ============================================================================
