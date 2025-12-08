@@ -9,6 +9,8 @@
 *.user
 *.userosscache
 *.sln.docstates
+# offsets
+offsets/
 
 # vcpkg
 **/vcpkg_installed/

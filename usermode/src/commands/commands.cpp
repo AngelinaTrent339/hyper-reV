@@ -8,9 +8,56 @@
 #include <hypercall/hypercall_def.h>
 
 #include <array>
+#include <cctype>
 #include <chrono>
 #include <format>
 #include <print>
+
+#include <Windows.h>
+
+// Windows structures for process enumeration
+typedef struct _UNICODE_STRING {
+  USHORT Length;
+  USHORT MaximumLength;
+  PWSTR Buffer;
+} UNICODE_STRING;
+
+typedef struct _SYSTEM_PROCESS_INFORMATION {
+  ULONG NextEntryOffset;
+  ULONG NumberOfThreads;
+  LARGE_INTEGER WorkingSetPrivateSize;
+  ULONG HardFaultCount;
+  ULONG NumberOfThreadsHighWatermark;
+  ULONGLONG CycleTime;
+  LARGE_INTEGER CreateTime;
+  LARGE_INTEGER UserTime;
+  LARGE_INTEGER KernelTime;
+  UNICODE_STRING ImageName;
+  LONG BasePriority;
+  HANDLE UniqueProcessId;
+  HANDLE InheritedFromUniqueProcessId;
+  ULONG HandleCount;
+  ULONG SessionId;
+  ULONG_PTR UniqueProcessKey;
+  SIZE_T PeakVirtualSize;
+  SIZE_T VirtualSize;
+  ULONG PageFaultCount;
+  SIZE_T PeakWorkingSetSize;
+  SIZE_T WorkingSetSize;
+  SIZE_T QuotaPeakPagedPoolUsage;
+  SIZE_T QuotaPagedPoolUsage;
+  SIZE_T QuotaPeakNonPagedPoolUsage;
+  SIZE_T QuotaNonPagedPoolUsage;
+  SIZE_T PagefileUsage;
+  SIZE_T PeakPagefileUsage;
+  SIZE_T PrivatePageCount;
+  LARGE_INTEGER ReadOperationCount;
+  LARGE_INTEGER WriteOperationCount;
+  LARGE_INTEGER OtherOperationCount;
+  LARGE_INTEGER ReadTransferCount;
+  LARGE_INTEGER WriteTransferCount;
+  LARGE_INTEGER OtherTransferCount;
+} SYSTEM_PROCESS_INFORMATION;
 
 #define d_invoke_command_processor(command) process_##command(##command)
 #define d_initial_process_command(command)                                     \
@@ -1093,14 +1140,130 @@ static std::string target_process = "";
 static std::uint64_t ki_syscall_hook_addr = 0;
 static bool is_monitoring = false;
 
-// Find process CR3 by name
-// TODO: Implement proper CR3 lookup via kernel query
-// For now, just returns 0 (no process filtering)
+// Find process CR3 by name using NtQuerySystemInformation + kernel read
 std::uint64_t find_process_cr3(const std::string &process_name) {
-  // Process-specific CR3 filtering not yet implemented
-  // The monitor will log ALL syscalls for now
-  // Future: Use NtQuerySystemInformation + kernel read to get process CR3
-  (void)process_name;
+  // Query process list
+  std::uint32_t buffer_size = 0;
+  sys::user::query_system_information(5, nullptr, 0, &buffer_size);
+
+  if (buffer_size == 0) {
+    console::error("Failed to query process information buffer size");
+    return 0;
+  }
+
+  std::vector<std::uint8_t> buffer(buffer_size + 0x10000);
+  std::uint32_t returned = 0;
+
+  if (sys::user::query_system_information(
+          5, buffer.data(), static_cast<std::uint32_t>(buffer.size()),
+          &returned) != 0) {
+    console::error("Failed to query system process information");
+    return 0;
+  }
+
+  // Parse process list to find target
+  std::uint8_t *ptr = buffer.data();
+  DWORD target_pid = 0;
+
+  while (true) {
+    auto *proc_info = reinterpret_cast<SYSTEM_PROCESS_INFORMATION *>(ptr);
+
+    if (proc_info->ImageName.Buffer != nullptr) {
+      // Convert wide string to narrow for comparison
+      std::wstring wname(proc_info->ImageName.Buffer,
+                         proc_info->ImageName.Length / sizeof(wchar_t));
+      std::string name(wname.begin(), wname.end());
+
+      // Case-insensitive compare
+      std::string lower_name = name;
+      std::string lower_target = process_name;
+      for (auto &c : lower_name)
+        c = static_cast<char>(std::tolower(c));
+      for (auto &c : lower_target)
+        c = static_cast<char>(std::tolower(c));
+
+      if (lower_name == lower_target) {
+        target_pid = static_cast<DWORD>(
+            reinterpret_cast<ULONG_PTR>(proc_info->UniqueProcessId));
+        console::success(
+            std::format("Found process: {} (PID: {})", name, target_pid));
+        break;
+      }
+    }
+
+    if (proc_info->NextEntryOffset == 0)
+      break;
+    ptr += proc_info->NextEntryOffset;
+  }
+
+  if (target_pid == 0) {
+    console::error(std::format("Process '{}' not found", process_name));
+    return 0;
+  }
+
+  // Now we need to get the CR3 from the EPROCESS structure
+  // Use PsLookupProcessByProcessId or read EPROCESS directly
+  // We'll read PsInitialSystemProcess and walk the ActiveProcessLinks
+
+  // Get PsInitialSystemProcess address
+  auto &ntoskrnl = sys::kernel::modules_list["ntoskrnl.exe"];
+  std::uint64_t ps_initial = 0;
+
+  if (ntoskrnl.exports.contains("PsInitialSystemProcess")) {
+    std::uint64_t ptr_addr = ntoskrnl.exports["PsInitialSystemProcess"];
+    // Read the pointer value
+    hypercall::read_guest_virtual_memory(&ps_initial, ptr_addr,
+                                         sys::current_cr3, 8);
+  }
+
+  if (ps_initial == 0) {
+    console::warn(
+        "Cannot resolve PsInitialSystemProcess - process filtering disabled");
+    console::info("Monitoring ALL syscalls instead");
+    return 0;
+  }
+
+  // Walk EPROCESS list to find our target PID
+  // EPROCESS offsets for Windows 11 24H2 (Germanium kernel):
+  // DirectoryTableBase: 0x28 (in KPROCESS at start of EPROCESS)
+  // UniqueProcessId: 0x1d0
+  // ActiveProcessLinks: 0x1d8
+  constexpr std::uint64_t EPROCESS_PID_OFFSET = 0x1d0;
+  constexpr std::uint64_t EPROCESS_DTB_OFFSET = 0x28;
+  constexpr std::uint64_t EPROCESS_LINKS_OFFSET = 0x1d8;
+
+  std::uint64_t current_eprocess = ps_initial;
+  std::uint64_t first_eprocess = ps_initial;
+
+  for (int i = 0; i < 1000; i++) { // Safety limit
+    // Read PID from this EPROCESS
+    std::uint64_t pid = 0;
+    hypercall::read_guest_virtual_memory(
+        &pid, current_eprocess + EPROCESS_PID_OFFSET, sys::current_cr3, 8);
+
+    if (static_cast<DWORD>(pid) == target_pid) {
+      // Found it! Read CR3
+      std::uint64_t cr3 = 0;
+      hypercall::read_guest_virtual_memory(
+          &cr3, current_eprocess + EPROCESS_DTB_OFFSET, sys::current_cr3, 8);
+
+      console::success(std::format("Process CR3: {:#x}", cr3));
+      return cr3;
+    }
+
+    // Move to next process
+    std::uint64_t flink = 0;
+    hypercall::read_guest_virtual_memory(
+        &flink, current_eprocess + EPROCESS_LINKS_OFFSET, sys::current_cr3, 8);
+
+    current_eprocess = flink - EPROCESS_LINKS_OFFSET;
+
+    if (current_eprocess == first_eprocess || current_eprocess == 0) {
+      break; // Wrapped around or invalid
+    }
+  }
+
+  console::warn("Could not find process EPROCESS - monitoring ALL syscalls");
   return 0;
 }
 
@@ -1516,11 +1679,9 @@ void process_monitor_cmd(CLI::App *monitor_cmd) {
     return;
   }
 
-  // Look up process (optional - for future CR3 filtering)
-  process_monitor::find_process_cr3(target);
-
-  // For now, hook KiSystemCall64 with --monitor to log all syscalls
-  // Future: filter by CR3
+  // Look up process and get CR3 for filtering
+  std::uint64_t target_cr3 = process_monitor::find_process_cr3(target);
+  process_monitor::target_cr3 = target_cr3;
 
   // Build monitor code (same as hook --monitor)
   hypercall_info_t hc = {};
@@ -1547,8 +1708,19 @@ void process_monitor_cmd(CLI::App *monitor_cmd) {
     return;
   }
 
-  // Enable syscall logging at hypervisor level (mode 1 = log_all)
-  hypercall::enable_syscall_intercept(1);
+  // Set up syscall filtering
+  if (target_cr3 != 0) {
+    // Enable filtered mode with process CR3
+    hypercall::set_syscall_filter(0, 0xFFFFFFFF,
+                                  target_cr3); // All syscalls, from this CR3
+    hypercall::enable_syscall_intercept(2);    // Mode 2 = log_filtered
+    console::info(
+        std::format("Filtering syscalls from CR3: {:#x}", target_cr3));
+  } else {
+    // No CR3 filter - log all syscalls (might be spammy)
+    hypercall::enable_syscall_intercept(1); // Mode 1 = log_all
+    console::warn("No CR3 filter - logging ALL syscalls (may be spammy)");
+  }
 
   process_monitor::is_monitoring = true;
   process_monitor::target_process = target;
