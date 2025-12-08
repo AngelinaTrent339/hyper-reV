@@ -188,3 +188,9 @@ std::uint64_t hypercall::hook_lstar(std::uint64_t lstar_va,
 
   return make_hypercall(call_type, 0, lstar_va, shadow_page_pa, 0);
 }
+
+std::uint64_t hypercall::read_msr(std::uint32_t msr_index) {
+  hypercall_type_t call_type = hypercall_type_t::read_msr;
+
+  return make_hypercall(call_type, 0, msr_index, 0, 0);
+}

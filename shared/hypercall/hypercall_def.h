@@ -20,7 +20,8 @@ enum class hypercall_type_t : std::uint64_t {
   set_syscall_filter,        // Set filter for which syscalls to log
   flush_syscall_logs,        // Flush syscall logs to usermode
   get_syscall_log_count,     // Get number of pending syscall logs
-  hook_lstar,                // Hook LSTAR (KiSystemCall64) directly via NPT
+  read_msr,   // Read an MSR value (RDX = MSR index, returns value in RAX)
+  hook_lstar, // Hook LSTAR (KiSystemCall64) directly via NPT
 };
 
 #pragma warning(push)

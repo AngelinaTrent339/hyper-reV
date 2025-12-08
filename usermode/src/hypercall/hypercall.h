@@ -3,7 +3,6 @@
 #include <structures/trap_frame.h>
 #include <vector>
 
-
 namespace hypercall {
 std::uint64_t
 read_guest_physical_memory(void *guest_destination_buffer,
@@ -81,4 +80,8 @@ std::uint64_t get_syscall_log_count();
 // Hook LSTAR directly (KiSystemCall64) - ultimate power!
 // This intercepts ALL syscalls at the hypervisor level
 std::uint64_t hook_lstar(std::uint64_t lstar_va, std::uint64_t shadow_page_pa);
+
+// Read MSR value from hypervisor level
+// Common MSRs: IA32_LSTAR = 0xC0000082, IA32_STAR = 0xC0000081
+std::uint64_t read_msr(std::uint32_t msr_index);
 } // namespace hypercall

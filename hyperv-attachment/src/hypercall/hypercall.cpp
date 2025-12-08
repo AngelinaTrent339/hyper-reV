@@ -13,6 +13,7 @@
 
 #include <hypercall/hypercall_def.h>
 #include <ia32-doc/ia32.hpp>
+#include <intrin.h>
 
 std::uint64_t
 operate_on_guest_physical_memory(const trap_frame_t *const trap_frame,
@@ -412,6 +413,13 @@ void hypercall::process(const hypercall_info_t hypercall_info,
   }
   case hypercall_type_t::get_syscall_log_count: {
     trap_frame->rax = syscall_intercept::get_log_count();
+    break;
+  }
+  case hypercall_type_t::read_msr: {
+    // RDX = MSR index to read
+    // Returns: MSR value in RAX
+    std::uint32_t msr_index = static_cast<std::uint32_t>(trap_frame->rdx);
+    trap_frame->rax = __readmsr(msr_index);
     break;
   }
   case hypercall_type_t::hook_lstar: {
