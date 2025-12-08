@@ -246,6 +246,14 @@ void do_stack_data_copy(trap_frame_log_t &trap_frame, const cr3 guest_cr3) {
 void log_current_state(trap_frame_log_t trap_frame) {
   cr3 guest_cr3 = arch::get_guest_cr3();
 
+  // Check CR3 filter from syscall_intercept config
+  // This is set via set_syscall_filter hypercall (R9 = cr3_filter)
+  // If filter is set and CR3 doesn't match, skip logging
+  std::uint64_t filter_cr3 = syscall_intercept::get_filter_cr3();
+  if (filter_cr3 != 0 && guest_cr3.flags != filter_cr3) {
+    return;
+  }
+
   do_stack_data_copy(trap_frame, guest_cr3);
 
   trap_frame.cr3 = guest_cr3.flags;

@@ -1334,7 +1334,7 @@ void process_monitor_cmd(CLI::App *monitor_cmd) {
     }
 
     // Clear hypervisor-level CR3 filter
-    hypercall::set_log_filter_cr3(0);
+    hypercall::set_syscall_filter(0, 0xFFFFFFFFFFFFFFFF, 0);
 
     process_monitor::is_monitoring = false;
     process_monitor::target_cr3 = 0;
@@ -1426,8 +1426,9 @@ void process_monitor_cmd(CLI::App *monitor_cmd) {
 
     // Set hypervisor-level CR3 filter BEFORE hooking
     // This prevents log buffer from filling with non-target syscalls
+    // Use set_syscall_filter with min=0, max=MAX, cr3=target to filter
     if (cr3 != 0) {
-      hypercall::set_log_filter_cr3(cr3);
+      hypercall::set_syscall_filter(0, 0xFFFFFFFFFFFFFFFF, cr3);
       console::info(std::format("Set hypervisor CR3 filter: {:#x}", cr3));
     }
 
@@ -1437,7 +1438,7 @@ void process_monitor_cmd(CLI::App *monitor_cmd) {
       console::error("Failed to find KiSystemCall64");
       // Clear filter if we fail
       if (cr3 != 0) {
-        hypercall::set_log_filter_cr3(0);
+        hypercall::set_syscall_filter(0, 0xFFFFFFFFFFFFFFFF, 0);
       }
       return;
     }
@@ -1465,7 +1466,7 @@ void process_monitor_cmd(CLI::App *monitor_cmd) {
       console::error("Failed to hook KiSystemCall64");
       // Clear filter if we fail
       if (cr3 != 0) {
-        hypercall::set_log_filter_cr3(0);
+        hypercall::set_syscall_filter(0, 0xFFFFFFFFFFFFFFFF, 0);
       }
       return;
     }

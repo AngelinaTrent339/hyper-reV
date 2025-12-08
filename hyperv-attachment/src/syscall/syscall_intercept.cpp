@@ -72,6 +72,10 @@ void syscall_intercept::set_filter(std::uint64_t syscall_min,
   g_config.filter_cr3 = cr3_filter;
 }
 
+std::uint64_t syscall_intercept::get_filter_cr3() {
+  return g_config.filter_cr3;
+}
+
 std::uint64_t syscall_intercept::handle_lstar_read() {
   // Return the original LSTAR value to the guest
   // This hides our hook from usermode detection

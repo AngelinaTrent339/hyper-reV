@@ -3,7 +3,6 @@
 #include "../memory_manager/heap_manager.h"
 #include "../memory_manager/memory_manager.h"
 
-
 namespace {
 crt::mutex_t log_mutex = {};
 }
@@ -24,11 +23,7 @@ void logs::set_up() {
 }
 
 void logs::add_log(const trap_frame_log_t &trap_frame) {
-  // Check CR3 filter BEFORE acquiring lock for performance
-  // If filter is set and CR3 doesn't match, skip logging entirely
-  if (filter_cr3 != 0 && trap_frame.cr3 != filter_cr3) {
-    return;
-  }
+  // Note: CR3 filtering is done in log_current_state before calling this
 
   log_mutex.lock();
 

@@ -48,6 +48,9 @@ filter_mode_t get_mode();
 void set_filter(std::uint64_t syscall_min, std::uint64_t syscall_max,
                 std::uint64_t cr3_filter);
 
+// Get the current CR3 filter (used by log_current_state for trap frame logs)
+std::uint64_t get_filter_cr3();
+
 // Called when LSTAR is being read/written (MSR intercept)
 std::uint64_t handle_lstar_read();
 void handle_lstar_write(std::uint64_t new_value);
