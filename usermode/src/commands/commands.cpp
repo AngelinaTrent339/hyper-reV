@@ -1093,73 +1093,14 @@ static std::string target_process = "";
 static std::uint64_t ki_syscall_hook_addr = 0;
 static bool is_monitoring = false;
 
-// Find process CR3 by name using NtQuerySystemInformation
+// Find process CR3 by name
+// TODO: Implement proper CR3 lookup via kernel query
+// For now, just returns 0 (no process filtering)
 std::uint64_t find_process_cr3(const std::string &process_name) {
-  // Use SYSTEM_PROCESS_INFORMATION to enumerate processes
-  std::uint32_t buffer_size = 0;
-  sys::user::query_system_information(5, nullptr, 0,
-                                      &buffer_size); // SystemProcessInformation
-
-  if (buffer_size == 0)
-    return 0;
-
-  std::vector<std::uint8_t> buffer(buffer_size + 0x10000);
-  std::uint32_t returned = 0;
-
-  if (sys::user::query_system_information(
-          5, buffer.data(), static_cast<std::uint32_t>(buffer.size()),
-          &returned) != 0) {
-    return 0;
-  }
-
-  // Parse SYSTEM_PROCESS_INFORMATION structures
-  std::uint8_t *ptr = buffer.data();
-  while (true) {
-    auto *proc_info = reinterpret_cast<SYSTEM_PROCESS_INFORMATION *>(ptr);
-
-    if (proc_info->ImageName.Buffer != nullptr) {
-      // Convert wide string to narrow
-      std::wstring wname(proc_info->ImageName.Buffer,
-                         proc_info->ImageName.Length / sizeof(wchar_t));
-      std::string name(wname.begin(), wname.end());
-
-      // Case-insensitive compare
-      std::string lower_name = name;
-      std::string lower_target = process_name;
-      for (auto &c : lower_name)
-        c = static_cast<char>(std::tolower(c));
-      for (auto &c : lower_target)
-        c = static_cast<char>(std::tolower(c));
-
-      if (lower_name == lower_target) {
-        // Found the process - read its DTB (CR3) from EPROCESS
-        // The DirectoryTableBase is at offset 0x28 in EPROCESS on modern
-        // Windows
-        std::uint64_t eprocess =
-            reinterpret_cast<std::uint64_t>(proc_info->UniqueProcessId);
-
-        // We need to find CR3 via different method - use existing
-        // infrastructure For now, return a placeholder that will be resolved
-        // via PsLookupProcessByProcessId Actually, let's just use the current
-        // CR3 as a test placeholder Real implementation would query the kernel
-        // for the process's DTB
-
-        // TODO: Implement proper CR3 lookup
-        console::success(std::format(
-            "Found process: {} (PID: {})", name,
-            reinterpret_cast<std::uint64_t>(proc_info->UniqueProcessId)));
-
-        // Return 0 for now - process-specific filtering not implemented yet
-        // The monitor will still work, just without process filtering initially
-        return 0; // TODO: Get actual CR3
-      }
-    }
-
-    if (proc_info->NextEntryOffset == 0)
-      break;
-    ptr += proc_info->NextEntryOffset;
-  }
-
+  // Process-specific CR3 filtering not yet implemented
+  // The monitor will log ALL syscalls for now
+  // Future: Use NtQuerySystemInformation + kernel read to get process CR3
+  (void)process_name;
   return 0;
 }
 

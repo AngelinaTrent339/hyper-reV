@@ -403,8 +403,7 @@ void hypercall::process(const hypercall_info_t hypercall_info,
                                                         guest_buffer_va);
 
     if (guest_buffer_pa != 0) {
-      void *host_ptr = memory_manager::translate_to_host_address(
-          {.address = guest_buffer_pa});
+      void *host_ptr = memory_manager::map_host_physical(guest_buffer_pa);
       trap_frame->rax = syscall_intercept::flush_logs(host_ptr, max_entries);
     } else {
       trap_frame->rax = 0;
