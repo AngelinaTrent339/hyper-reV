@@ -4,16 +4,16 @@
 #include "../memory_manager/heap_manager.h"
 #include "../slat/hook/hook.h"
 #include "../slat/slat.h"
-
+#include "../structures/virtual_address.h"
 
 #include <intrin.h>
 
 namespace {
-// MSR definitions
-constexpr std::uint32_t IA32_LSTAR = 0xC0000082;
-constexpr std::uint32_t IA32_STAR = 0xC0000081;
-constexpr std::uint32_t IA32_FMASK = 0xC0000084;
-constexpr std::uint32_t IA32_EFER = 0xC0000080;
+// MSR definitions (prefixed to avoid conflict with ia32.hpp)
+constexpr std::uint32_t MSR_LSTAR = 0xC0000082;
+constexpr std::uint32_t MSR_STAR = 0xC0000081;
+constexpr std::uint32_t MSR_FMASK = 0xC0000084;
+constexpr std::uint32_t MSR_EFER = 0xC0000080;
 
 // Syscall interception state
 syscall_intercept::config_t g_config = {};
@@ -87,7 +87,9 @@ void syscall_intercept::handle_lstar_write(std::uint64_t new_value) {
   if (g_config.mode != filter_mode_t::disabled) {
     // Remove old hook if exists
     if (g_syscall_original_page_pa != 0) {
-      slat::hook::remove({.address = g_syscall_original_page_pa});
+      virtual_address_t addr;
+      addr.address = g_syscall_original_page_pa;
+      slat::hook::remove(addr);
     }
 
     // The new LSTAR value is the virtual address of KiSystemCall64
