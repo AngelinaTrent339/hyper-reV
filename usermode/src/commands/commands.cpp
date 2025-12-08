@@ -1372,13 +1372,15 @@ void process_monitor_cmd(CLI::App *monitor_cmd) {
   } else if (*status_cmd) {
     console::separator("Process Monitor Status");
     if (process_monitor::is_monitoring) {
-      console::print_value("Status", "MONITORING");
-      console::print_value("Process", process_monitor::target_process);
+      std::println("  Status:      {}MONITORING{}", console::color::green,
+                   console::color::reset);
+      std::println("  Process:     {}", process_monitor::target_process);
       console::print_value("Target CR3", process_monitor::target_cr3);
       console::print_value("Hook Address",
                            process_monitor::ki_syscall_hook_addr);
     } else {
-      console::print_value("Status", "STOPPED");
+      std::println("  Status:      {}STOPPED{}", console::color::dim,
+                   console::color::reset);
     }
     console::separator();
   } else {
