@@ -927,6 +927,137 @@ void process_fl(CLI::App *fl) {
 }
 
 // ============================================================================
+// PROCESS CR3 AUTO-TRACKING COMMANDS
+// ============================================================================
+
+CLI::App *init_track(CLI::App &app) {
+  CLI::App *track = app.add_subcommand("track", "process CR3 auto-tracking")
+                        ->ignore_case()
+                        ->alias("tpid");
+
+  // Subcommands for different tracking operations
+  track->add_subcommand("set", "set PID to track and auto-capture CR3");
+  track->add_subcommand("status", "show current tracking status");
+  track->add_subcommand("clear", "clear tracked PID and captured CR3");
+  track->add_subcommand("cr3", "get captured CR3 for tracked process");
+
+  // For 'track set', we need a PID option
+  add_command_option(track->get_subcommand("set"), "pid")->required();
+
+  return track;
+}
+
+void process_track(CLI::App *track) {
+  auto *set_cmd = track->get_subcommand("set");
+  auto *status_cmd = track->get_subcommand("status");
+  auto *clear_cmd = track->get_subcommand("clear");
+  auto *cr3_cmd = track->get_subcommand("cr3");
+
+  if (*set_cmd) {
+    const std::uint64_t pid = get_command_option<std::uint64_t>(set_cmd, "pid");
+
+    const std::uint64_t result = hypercall::set_tracked_pid(pid);
+
+    if (result == 1) {
+      console::success(std::format("Now tracking PID {} (0x{:X})", pid, pid));
+      console::info(
+          "The hypervisor will capture the CR3 when this process executes.");
+      console::info(
+          "Use 'track status' or 'track cr3' to check if CR3 was captured.");
+    } else {
+      console::error("Failed to set tracked PID", std::format("PID={}", pid));
+    }
+  } else if (*status_cmd) {
+    hypercall::tracking_status_t status = {};
+    const std::uint64_t cr3 = hypercall::get_tracking_status(&status);
+
+    std::println("");
+    std::println(
+        "{}╔════════════════════════════════════════════════════════════════╗{"
+        "}",
+        console::color::cyan, console::color::reset);
+    std::println("{}║{} {}PROCESS CR3 TRACKING STATUS{}                        "
+                 "            {}║{}",
+                 console::color::cyan, console::color::reset,
+                 console::color::bold, console::color::reset,
+                 console::color::cyan, console::color::reset);
+    std::println(
+        "{}╚════════════════════════════════════════════════════════════════╝{"
+        "}",
+        console::color::cyan, console::color::reset);
+    std::println("");
+
+    if (status.tracked_pid == 0) {
+      console::info("No process is currently being tracked.");
+      console::info("Use 'track set <pid>' to start tracking a process.");
+    } else {
+      std::println("  {}Tracked PID{}:    {} (0x{:X})", console::color::yellow,
+                   console::color::reset, status.tracked_pid,
+                   status.tracked_pid);
+
+      if (status.tracked_cr3 != 0) {
+        std::println("  {}Captured CR3{}:   {}0x{:016X}{}  ✓",
+                     console::color::green, console::color::reset,
+                     console::color::cyan, status.tracked_cr3,
+                     console::color::reset);
+        std::println("  {}GS Base{}:        0x{:016X}", console::color::dim,
+                     console::color::reset, status.gs_base);
+        std::println("  {}Match Count{}:    {}", console::color::dim,
+                     console::color::reset, status.match_count);
+        std::println("");
+        console::success(
+            "CR3 captured! You can now use this CR3 for memory operations.");
+        std::println("");
+        console::info(std::format("Example: rgvm <address> 0x{:X} <size>",
+                                  status.tracked_cr3));
+      } else {
+        std::println("  {}Captured CR3{}:   (not yet captured)",
+                     console::color::yellow, console::color::reset);
+        std::println("");
+        console::info("Waiting for the tracked process to execute...");
+        console::info("Make sure the target process is running and active.");
+      }
+    }
+    std::println("");
+  } else if (*clear_cmd) {
+    const std::uint64_t result = hypercall::clear_tracked_pid();
+
+    if (result == 1) {
+      console::success("Tracking cleared.");
+    } else {
+      console::error("Failed to clear tracking");
+    }
+  } else if (*cr3_cmd) {
+    const std::uint64_t cr3 = hypercall::get_tracked_cr3();
+
+    if (cr3 != 0) {
+      console::print_value("Tracked CR3", cr3);
+    } else {
+      console::warn("CR3 not yet captured or no PID is being tracked.");
+      console::info(
+          "Use 'track set <pid>' first, then wait for the process to execute.");
+    }
+  } else {
+    // No subcommand specified, show help
+    console::info("Process CR3 Auto-Tracking Commands:");
+    std::println("");
+    std::println("  {}track set <pid>{}   - Start tracking a process by PID",
+                 console::color::yellow, console::color::reset);
+    std::println(
+        "  {}track status{}      - Show tracking status and captured CR3",
+        console::color::yellow, console::color::reset);
+    std::println("  {}track cr3{}         - Get the captured CR3 value",
+                 console::color::yellow, console::color::reset);
+    std::println("  {}track clear{}       - Stop tracking and clear state",
+                 console::color::yellow, console::color::reset);
+    std::println("");
+    console::info(
+        "The hypervisor automatically captures CR3 when the tracked PID");
+    console::info("is seen executing in user mode during any VM exit.");
+  }
+}
+
+// ============================================================================
 // ANALYSIS COMMANDS
 // ============================================================================
 
@@ -1125,6 +1256,9 @@ void commands::process(const std::string command) {
   CLI::App *hgpp = init_hgpp(app, aliases_transformer);
   CLI::App *fl = init_fl(app);
 
+  // Process CR3 tracking commands
+  CLI::App *track = init_track(app);
+
   // Analysis commands
   CLI::App *hfpc = init_hfpc(app);
   CLI::App *lkm = init_lkm(app);
@@ -1155,6 +1289,9 @@ void commands::process(const std::string command) {
     d_process_command(rkh);
     d_process_command(hgpp);
     d_process_command(fl);
+
+    // Process CR3 tracking
+    d_process_command(track);
 
     // Analysis
     d_process_command(hfpc);

@@ -13,6 +13,164 @@
 #include <hypercall/hypercall_def.h>
 #include <ia32-doc/ia32.hpp>
 
+// =============================================================================
+// Process CR3 Auto-Tracking State
+// =============================================================================
+// This allows automatic capture of a process's CR3 by monitoring VM exits
+// and checking the current guest's GS base (which points to KTHREAD/TEB in user
+// mode)
+
+namespace process_tracking {
+// The PID we're looking for
+volatile std::uint64_t tracked_pid = 0;
+
+// The captured CR3 for the tracked process
+volatile std::uint64_t tracked_cr3 = 0;
+
+// Counter for how many times we've seen the process (debugging)
+volatile std::uint64_t match_count = 0;
+
+// GS base when we captured the CR3 (for debugging)
+volatile std::uint64_t captured_gs_base = 0;
+} // namespace process_tracking
+
+// =============================================================================
+// try_capture_tracked_cr3 - Called on every VM exit to capture target CR3
+// =============================================================================
+// This function checks if the current guest process matches our tracked PID.
+// On Windows x64, when in user mode:
+//   - GS base points to the TEB (Thread Environment Block)
+//   - TEB+0x40 contains the ClientId structure (PID at offset 0)
+// When in kernel mode:
+//   - GS base points to the KPCR (Kernel Processor Control Region)
+//   - We can walk to KTHREAD and get the process ID
+//
+// For simplicity, we check user-mode GS base (TEB) since most VM exits from
+// a user-mode process will have the TEB in GS.
+
+void hypercall::try_capture_tracked_cr3() {
+  // Quick check - if not tracking or already captured, return immediately
+  if (process_tracking::tracked_pid == 0) {
+    return;
+  }
+
+  if (process_tracking::tracked_cr3 != 0) {
+    return; // Already captured
+  }
+
+#ifndef _INTELMACHINE
+  // AMD: Get VMCB to check CPL and GS base
+  vmcb_t *vmcb = arch::get_vmcb();
+  if (vmcb == nullptr) {
+    return;
+  }
+
+  // Check if we're in Ring 3 (user mode) - CS selector RPL bits
+  const std::uint16_t cs_selector = vmcb->save_state.cs_selector;
+  const std::uint8_t cpl = cs_selector & 0x3;
+
+  if (cpl != 3) {
+    return; // Not in user mode, skip
+  }
+
+  // In user mode, GS base points to TEB
+  const std::uint64_t gs_base = vmcb->save_state.gs_base;
+  if (gs_base == 0) {
+    return;
+  }
+
+  // Read PID from TEB+0x40 (ClientId.UniqueProcess)
+  // TEB structure (partial):
+  //   +0x000 NtTib
+  //   +0x038 ClientId
+  //   +0x038   UniqueProcess (HANDLE = 8 bytes on x64)
+  //   +0x040   UniqueThread
+  // Wait, that's wrong. Let me check:
+  // Actually on Windows x64, in the TEB:
+  //   +0x040 points to ClientId.UniqueProcess (the PID as HANDLE)
+
+  const cr3 guest_cr3 = {.flags = vmcb->save_state.cr3};
+  const cr3 slat_cr3 = slat::hyperv_cr3();
+
+  // Translate the GS:0x40 address (TEB+0x40 = ClientId.UniqueProcess)
+  const std::uint64_t pid_addr = gs_base + 0x40;
+  const std::uint64_t pid_physical =
+      memory_manager::translate_guest_virtual_address(guest_cr3, slat_cr3,
+                                                      {.address = pid_addr});
+
+  if (pid_physical == 0) {
+    return; // Translation failed
+  }
+
+  // Map and read the PID
+  void *pid_host_addr =
+      memory_manager::map_guest_physical(slat_cr3, pid_physical, nullptr);
+  if (pid_host_addr == nullptr) {
+    return;
+  }
+
+  // Read the PID (it's a HANDLE, which is 8 bytes on x64)
+  std::uint64_t current_pid = *reinterpret_cast<std::uint64_t *>(pid_host_addr);
+
+  // Check if this matches our tracked PID
+  if (current_pid == process_tracking::tracked_pid) {
+    // Match! Capture the CR3
+    process_tracking::tracked_cr3 = guest_cr3.address_of_page_directory << 12;
+    process_tracking::captured_gs_base = gs_base;
+    process_tracking::match_count++;
+  }
+
+#else
+  // Intel: Similar logic but using VMCS reads
+  // For Intel, we need to use vmread to get guest state
+
+  // Read CS access rights to check CPL
+  std::uint64_t cs_access_rights = 0;
+  vmread(VMCS_GUEST_CS_ACCESS_RIGHTS, &cs_access_rights);
+  const std::uint8_t dpl = (cs_access_rights >> 5) & 0x3;
+
+  if (dpl != 3) {
+    return; // Not Ring 3
+  }
+
+  // Read GS base
+  std::uint64_t gs_base = 0;
+  vmread(VMCS_GUEST_GS_BASE, &gs_base);
+
+  if (gs_base == 0) {
+    return;
+  }
+
+  // Read CR3
+  const cr3 guest_cr3 = arch::get_guest_cr3();
+  const cr3 slat_cr3 = slat::hyperv_cr3();
+
+  // Read PID from TEB+0x40
+  const std::uint64_t pid_addr = gs_base + 0x40;
+  const std::uint64_t pid_physical =
+      memory_manager::translate_guest_virtual_address(guest_cr3, slat_cr3,
+                                                      {.address = pid_addr});
+
+  if (pid_physical == 0) {
+    return;
+  }
+
+  void *pid_host_addr =
+      memory_manager::map_guest_physical(slat_cr3, pid_physical, nullptr);
+  if (pid_host_addr == nullptr) {
+    return;
+  }
+
+  std::uint64_t current_pid = *reinterpret_cast<std::uint64_t *>(pid_host_addr);
+
+  if (current_pid == process_tracking::tracked_pid) {
+    process_tracking::tracked_cr3 = guest_cr3.address_of_page_directory << 12;
+    process_tracking::captured_gs_base = gs_base;
+    process_tracking::match_count++;
+  }
+#endif
+}
+
 std::uint64_t
 operate_on_guest_physical_memory(const trap_frame_t *const trap_frame,
                                  const memory_operation_t operation) {
@@ -358,6 +516,65 @@ void hypercall::process(const hypercall_info_t hypercall_info,
   case hypercall_type_t::get_heap_free_page_count: {
     trap_frame->rax = heap_manager::get_free_page_count();
 
+    break;
+  }
+  // =========================================================================
+  // Process CR3 Auto-Tracking Hypercalls
+  // =========================================================================
+  case hypercall_type_t::set_tracked_pid: {
+    // rdx = PID to track
+    process_tracking::tracked_pid = trap_frame->rdx;
+    process_tracking::tracked_cr3 = 0; // Reset captured CR3
+    process_tracking::match_count = 0; // Reset match counter
+    process_tracking::captured_gs_base = 0;
+
+    trap_frame->rax = 1; // Success
+    break;
+  }
+  case hypercall_type_t::get_tracked_cr3: {
+    // Returns the captured CR3, or 0 if not yet captured
+    trap_frame->rax = process_tracking::tracked_cr3;
+    break;
+  }
+  case hypercall_type_t::clear_tracked_pid: {
+    // Clear all tracking state
+    process_tracking::tracked_pid = 0;
+    process_tracking::tracked_cr3 = 0;
+    process_tracking::match_count = 0;
+    process_tracking::captured_gs_base = 0;
+
+    trap_frame->rax = 1; // Success
+    break;
+  }
+  case hypercall_type_t::get_tracking_status: {
+    // Returns tracking status:
+    // rax = tracked_cr3 (or 0 if not captured)
+    // Also writes to provided buffer if r8 is non-zero
+
+    // If caller provides a buffer (r8), write extended status there
+    if (trap_frame->r8 != 0) {
+      const cr3 guest_cr3 = arch::get_guest_cr3();
+      const cr3 slat_cr3 = slat::hyperv_cr3();
+
+      // Buffer format: [tracked_pid, tracked_cr3, match_count, gs_base]
+      std::uint64_t status_buffer[4] = {
+          process_tracking::tracked_pid, process_tracking::tracked_cr3,
+          process_tracking::match_count, process_tracking::captured_gs_base};
+
+      const std::uint64_t guest_buffer_physical_address =
+          memory_manager::translate_guest_virtual_address(
+              guest_cr3, slat_cr3, {.address = trap_frame->r8});
+
+      if (guest_buffer_physical_address != 0) {
+        void *host_dest = memory_manager::map_guest_physical(
+            slat_cr3, guest_buffer_physical_address, nullptr);
+        if (host_dest != nullptr) {
+          crt::copy_memory(host_dest, status_buffer, sizeof(status_buffer));
+        }
+      }
+    }
+
+    trap_frame->rax = process_tracking::tracked_cr3;
     break;
   }
   default:

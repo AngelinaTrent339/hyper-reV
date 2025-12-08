@@ -122,6 +122,9 @@ std::uint64_t vmexit_handler_detour(std::uint64_t a1, std::uint64_t a2,
 
   process_first_vmexit();
 
+  // Process CR3 auto-tracking: attempt to capture the CR3 of tracked process
+  hypercall::try_capture_tracked_cr3();
+
   const std::uint64_t exit_reason = arch::get_vmexit_reason();
 
   if (arch::is_cpuid(exit_reason) == 1) {
