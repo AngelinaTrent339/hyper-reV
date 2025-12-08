@@ -1149,7 +1149,7 @@ CLI::App *init_syscall(CLI::App &app, CLI::Transformer &aliases_transformer) {
   return syscall_cmd;
 }
 
-void process_syscall(CLI::App *syscall_cmd) {
+void process_syscall_cmd(CLI::App *syscall_cmd) {
   auto hook_cmd = syscall_cmd->get_subcommand("hook");
   auto unhook_cmd = syscall_cmd->get_subcommand("unhook");
   auto list_cmd = syscall_cmd->get_subcommand("list");
