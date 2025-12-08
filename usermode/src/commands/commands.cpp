@@ -936,15 +936,34 @@ CLI::App *init_track(CLI::App &app) {
                         ->alias("tpid");
 
   // Subcommands for different tracking operations
-  track->add_subcommand("set", "set PID to track and auto-capture CR3");
+  track->add_subcommand(
+      "set", "set PID or process name to track and auto-capture CR3");
   track->add_subcommand("status", "show current tracking status");
   track->add_subcommand("clear", "clear tracked PID and captured CR3");
   track->add_subcommand("cr3", "get captured CR3 for tracked process");
 
-  // For 'track set', we need a PID option
-  add_command_option(track->get_subcommand("set"), "pid")->required();
+  // For 'track set', we need a target (PID or process name)
+  add_command_option(track->get_subcommand("set"), "target")->required();
 
   return track;
+}
+
+// Helper to check if a string is a valid numeric PID
+bool is_numeric_pid(const std::string &str) {
+  if (str.empty())
+    return false;
+
+  // Check for hex format (0x...)
+  if (str.size() > 2 && str[0] == '0' && (str[1] == 'x' || str[1] == 'X')) {
+    return std::all_of(str.begin() + 2, str.end(), [](char c) {
+      return std::isxdigit(static_cast<unsigned char>(c));
+    });
+  }
+
+  // Check for decimal
+  return std::all_of(str.begin(), str.end(), [](char c) {
+    return std::isdigit(static_cast<unsigned char>(c));
+  });
 }
 
 void process_track(CLI::App *track) {
@@ -954,12 +973,48 @@ void process_track(CLI::App *track) {
   auto *cr3_cmd = track->get_subcommand("cr3");
 
   if (*set_cmd) {
-    const std::uint64_t pid = get_command_option<std::uint64_t>(set_cmd, "pid");
+    const std::string target =
+        get_command_option<std::string>(set_cmd, "target");
+    std::uint64_t pid = 0;
+    std::string process_name;
+
+    if (is_numeric_pid(target)) {
+      // It's a numeric PID
+      if (target.size() > 2 && target[0] == '0' &&
+          (target[1] == 'x' || target[1] == 'X')) {
+        pid = std::stoull(target, nullptr, 16);
+      } else {
+        pid = std::stoull(target);
+      }
+    } else {
+      // It's a process name, look it up
+      process_name = target;
+      console::info(std::format("Looking up process '{}'...", process_name));
+
+      auto found_pid = sys::user::find_process_by_name(process_name);
+      if (found_pid.has_value()) {
+        pid = found_pid.value();
+        console::success(std::format("Found '{}' with PID {} (0x{:X})",
+                                     process_name, pid, pid));
+      } else {
+        console::error("Process not found",
+                       std::format("'{}' is not running", process_name));
+        console::info("Make sure the process is running and try again.");
+        console::info("Tip: You can also use Task Manager to find the PID and "
+                      "use 'track set <pid>'");
+        return;
+      }
+    }
 
     const std::uint64_t result = hypercall::set_tracked_pid(pid);
 
     if (result == 1) {
-      console::success(std::format("Now tracking PID {} (0x{:X})", pid, pid));
+      if (process_name.empty()) {
+        console::success(std::format("Now tracking PID {} (0x{:X})", pid, pid));
+      } else {
+        console::success(std::format("Now tracking '{}' (PID {} / 0x{:X})",
+                                     process_name, pid, pid));
+      }
       console::info(
           "The hypervisor will capture the CR3 when this process executes.");
       console::info(
@@ -1034,25 +1089,32 @@ void process_track(CLI::App *track) {
       console::print_value("Tracked CR3", cr3);
     } else {
       console::warn("CR3 not yet captured or no PID is being tracked.");
-      console::info(
-          "Use 'track set <pid>' first, then wait for the process to execute.");
+      console::info("Use 'track set <pid/name>' first, then wait for the "
+                    "process to execute.");
     }
   } else {
     // No subcommand specified, show help
     console::info("Process CR3 Auto-Tracking Commands:");
     std::println("");
-    std::println("  {}track set <pid>{}   - Start tracking a process by PID",
-                 console::color::yellow, console::color::reset);
     std::println(
-        "  {}track status{}      - Show tracking status and captured CR3",
+        "  {}track set <target>{}   - Start tracking by PID or process name",
         console::color::yellow, console::color::reset);
-    std::println("  {}track cr3{}         - Get the captured CR3 value",
+    std::println(
+        "  {}track status{}        - Show tracking status and captured CR3",
+        console::color::yellow, console::color::reset);
+    std::println("  {}track cr3{}           - Get the captured CR3 value",
                  console::color::yellow, console::color::reset);
-    std::println("  {}track clear{}       - Stop tracking and clear state",
+    std::println("  {}track clear{}         - Stop tracking and clear state",
                  console::color::yellow, console::color::reset);
     std::println("");
+    std::println("  {}Examples:{}", console::color::cyan,
+                 console::color::reset);
+    std::println("    track set notepad.exe   - Track by process name");
+    std::println("    track set 1234          - Track by PID (decimal)");
+    std::println("    track set 0x4D2         - Track by PID (hex)");
+    std::println("");
     console::info(
-        "The hypervisor automatically captures CR3 when the tracked PID");
+        "The hypervisor automatically captures CR3 when the tracked process");
     console::info("is seen executing in user mode during any VM exit.");
   }
 }

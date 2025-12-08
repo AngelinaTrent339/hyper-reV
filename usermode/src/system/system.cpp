@@ -7,7 +7,6 @@
 #include "../hook/hook.h"
 #include "../hypercall/hypercall.h"
 
-
 #include <portable_executable/image.hpp>
 
 #include <Windows.h>
@@ -15,7 +14,6 @@
 #include <print>
 #include <vector>
 #include <winternl.h>
-
 
 extern "C" NTSTATUS NTAPI RtlAdjustPrivilege(
     std::uint32_t privilege, std::uint8_t enable, std::uint8_t current_thread,
@@ -485,4 +483,57 @@ std::uint8_t sys::fs::write_to_disk(const std::string_view full_path,
   file.write(reinterpret_cast<const char *>(buffer.data()), buffer.size());
 
   return file.good();
+}
+
+// =============================================================================
+// Process Enumeration
+// =============================================================================
+
+#include <TlHelp32.h>
+
+std::optional<std::uint64_t>
+sys::user::find_process_by_name(const std::string &process_name) {
+  // Create a snapshot of all running processes
+  HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+
+  if (snapshot == INVALID_HANDLE_VALUE) {
+    return std::nullopt;
+  }
+
+  PROCESSENTRY32W process_entry = {};
+  process_entry.dwSize = sizeof(PROCESSENTRY32W);
+
+  // Get the first process
+  if (!Process32FirstW(snapshot, &process_entry)) {
+    CloseHandle(snapshot);
+    return std::nullopt;
+  }
+
+  // Convert the target name to lowercase for case-insensitive comparison
+  std::string target_lower = process_name;
+  std::ranges::transform(target_lower, target_lower.begin(), [](char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+
+  // Iterate through all processes
+  do {
+    // Convert wide string to narrow string
+    std::wstring wide_name(process_entry.szExeFile);
+    std::string current_name = to_string(wide_name);
+
+    // Convert to lowercase for comparison
+    std::string current_lower = current_name;
+    std::ranges::transform(current_lower, current_lower.begin(), [](char c) {
+      return static_cast<char>(std::tolower(c));
+    });
+
+    if (current_lower == target_lower) {
+      std::uint64_t pid = process_entry.th32ProcessID;
+      CloseHandle(snapshot);
+      return pid;
+    }
+  } while (Process32NextW(snapshot, &process_entry));
+
+  CloseHandle(snapshot);
+  return std::nullopt;
 }
