@@ -185,6 +185,7 @@
     <ClCompile Include="src\slat\cr3\deep_copy.cpp" />
     <ClCompile Include="src\slat\cr3\pte.cpp" />
     <ClCompile Include="src\slat\violation\violation.cpp" />
+    <ClCompile Include="src\syscall\syscall_intercept.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\apic\apic.h" />
@@ -210,6 +211,7 @@
     <ClInclude Include="src\slat\cr3\pte.h" />
     <ClInclude Include="src\slat\violation\violation.h" />
     <ClInclude Include="src\structures\virtual_address.h" />
+    <ClInclude Include="src\syscall\syscall_intercept.h" />
   </ItemGroup>
   <ItemGroup>
     <MASM Include="src\asm_funcs.asm" />

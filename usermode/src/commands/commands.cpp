@@ -13,16 +13,12 @@
 #include <format>
 #include <print>
 
+#define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
+#include <winternl.h>
 
-// Windows structures for process enumeration
-typedef struct _UNICODE_STRING {
-  USHORT Length;
-  USHORT MaximumLength;
-  PWSTR Buffer;
-} UNICODE_STRING;
-
-typedef struct _SYSTEM_PROCESS_INFORMATION {
+// Extended SYSTEM_PROCESS_INFORMATION (winternl.h has incomplete definition)
+typedef struct _MY_SYSTEM_PROCESS_INFORMATION {
   ULONG NextEntryOffset;
   ULONG NumberOfThreads;
   LARGE_INTEGER WorkingSetPrivateSize;
@@ -57,7 +53,7 @@ typedef struct _SYSTEM_PROCESS_INFORMATION {
   LARGE_INTEGER ReadTransferCount;
   LARGE_INTEGER WriteTransferCount;
   LARGE_INTEGER OtherTransferCount;
-} SYSTEM_PROCESS_INFORMATION;
+} MY_SYSTEM_PROCESS_INFORMATION;
 
 #define d_invoke_command_processor(command) process_##command(##command)
 #define d_initial_process_command(command)                                     \
@@ -1166,7 +1162,7 @@ std::uint64_t find_process_cr3(const std::string &process_name) {
   DWORD target_pid = 0;
 
   while (true) {
-    auto *proc_info = reinterpret_cast<SYSTEM_PROCESS_INFORMATION *>(ptr);
+    auto *proc_info = reinterpret_cast<MY_SYSTEM_PROCESS_INFORMATION *>(ptr);
 
     if (proc_info->ImageName.Buffer != nullptr) {
       // Convert wide string to narrow for comparison
