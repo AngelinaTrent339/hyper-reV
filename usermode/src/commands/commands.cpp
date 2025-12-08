@@ -1333,12 +1333,15 @@ void process_monitor_cmd(CLI::App *monitor_cmd) {
       hook::remove_kernel_hook(process_monitor::ki_syscall_hook_addr, 1);
     }
 
+    // Clear hypervisor-level CR3 filter
+    hypercall::set_log_filter_cr3(0);
+
     process_monitor::is_monitoring = false;
     process_monitor::target_cr3 = 0;
     process_monitor::target_process = "";
     process_monitor::ki_syscall_hook_addr = 0;
 
-    console::success("Stopped monitoring");
+    console::success("Stopped monitoring (CR3 filter cleared)");
   } else if (*logs_cmd) {
     constexpr std::uint64_t log_count = 100;
     std::vector<trap_frame_log_t> logs(log_count);
@@ -1346,6 +1349,7 @@ void process_monitor_cmd(CLI::App *monitor_cmd) {
 
     if (n == static_cast<std::uint64_t>(-1) || n == 0) {
       console::info("No logs captured yet");
+      console::info("Try triggering activity in the target process");
       return;
     }
 
@@ -1354,26 +1358,16 @@ void process_monitor_cmd(CLI::App *monitor_cmd) {
                                             ? "ALL"
                                             : process_monitor::target_process));
 
-    std::uint64_t shown = 0;
+    // All entries are already filtered by hypervisor, just display them
     for (std::uint64_t i = 0; i < n; i++) {
       const auto &l = logs[i];
 
-      // Filter by CR3 if we have a target
-      if (process_monitor::target_cr3 != 0 &&
-          l.cr3 != process_monitor::target_cr3) {
-        continue;
-      }
-
-      std::println("  [{}] RAX={:#x} RCX={:#x} RDX={:#x} R8={:#x}", shown++,
-                   l.rax, l.rcx, l.rdx, l.r8);
+      std::println("  [{}] RAX={:#x} RCX={:#x} RDX={:#x} R8={:#x}", i, l.rax,
+                   l.rcx, l.rdx, l.r8);
       std::println("       RIP={:#x} RSP={:#x} CR3={:#x}", l.rip, l.rsp, l.cr3);
     }
 
-    if (shown == 0) {
-      console::info("No syscalls from target process captured");
-    } else {
-      std::println("\n  Showed {} of {} total syscalls", shown, n);
-    }
+    std::println("\n  Showed {} syscalls (hypervisor-filtered)", n);
     console::separator();
   } else if (*status_cmd) {
     console::separator("Process Monitor Status");
@@ -1428,10 +1422,21 @@ void process_monitor_cmd(CLI::App *monitor_cmd) {
     process_monitor::target_cr3 = cr3;
     process_monitor::target_process = process_name;
 
+    // Set hypervisor-level CR3 filter BEFORE hooking
+    // This prevents log buffer from filling with non-target syscalls
+    if (cr3 != 0) {
+      hypercall::set_log_filter_cr3(cr3);
+      console::info(std::format("Set hypervisor CR3 filter: {:#x}", cr3));
+    }
+
     // Find and hook KiSystemCall64
     std::uint64_t ki_syscall = process_monitor::find_ki_system_call64();
     if (ki_syscall == 0) {
       console::error("Failed to find KiSystemCall64");
+      // Clear filter if we fail
+      if (cr3 != 0) {
+        hypercall::set_log_filter_cr3(0);
+      }
       return;
     }
 
@@ -1456,6 +1461,10 @@ void process_monitor_cmd(CLI::App *monitor_cmd) {
 
     if (result == 0) {
       console::error("Failed to hook KiSystemCall64");
+      // Clear filter if we fail
+      if (cr3 != 0) {
+        hypercall::set_log_filter_cr3(0);
+      }
       return;
     }
 
@@ -1469,8 +1478,8 @@ void process_monitor_cmd(CLI::App *monitor_cmd) {
       console::info(
           "Trigger activity in the target process, then use 'monitor logs'");
     } else {
-      console::info(std::format("Filtering by CR3: {:#x}", cr3));
-      console::info("Use 'monitor logs' to see captured syscalls");
+      console::success(std::format("Hypervisor filtering by CR3: {:#x}", cr3));
+      console::info("Use 'logs' to see captured syscalls");
     }
     console::warn("Use 'monitor stop' before exiting!");
   }

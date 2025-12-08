@@ -445,6 +445,12 @@ void hypercall::process(const hypercall_info_t hypercall_info,
     }
     break;
   }
+  case hypercall_type_t::set_log_filter_cr3: {
+    // RDX = CR3 to filter by (0 = no filter, log all)
+    logs::set_filter_cr3(trap_frame->rdx);
+    trap_frame->rax = 1;
+    break;
+  }
 
   default:
     break;

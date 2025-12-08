@@ -22,6 +22,8 @@ enum class hypercall_type_t : std::uint64_t {
   get_syscall_log_count,     // Get number of pending syscall logs
   read_msr,   // Read an MSR value (RDX = MSR index, returns value in RAX)
   hook_lstar, // Hook LSTAR (KiSystemCall64) directly via NPT
+  set_log_filter_cr3, // Set CR3 filter for trap frame logs (RDX = CR3, 0 = no
+                      // filter)
 };
 
 #pragma warning(push)

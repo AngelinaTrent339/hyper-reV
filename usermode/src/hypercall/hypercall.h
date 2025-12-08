@@ -84,4 +84,8 @@ std::uint64_t hook_lstar(std::uint64_t lstar_va, std::uint64_t shadow_page_pa);
 // Read MSR value from hypervisor level
 // Common MSRs: IA32_LSTAR = 0xC0000082, IA32_STAR = 0xC0000081
 std::uint64_t read_msr(std::uint32_t msr_index);
+
+// Set CR3 filter for trap frame logs (used by monitor command)
+// cr3_filter = 0 means no filter (log all), otherwise only log matching CR3
+std::uint64_t set_log_filter_cr3(std::uint64_t cr3_filter);
 } // namespace hypercall

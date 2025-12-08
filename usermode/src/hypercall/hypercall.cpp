@@ -194,3 +194,9 @@ std::uint64_t hypercall::read_msr(std::uint32_t msr_index) {
 
   return make_hypercall(call_type, 0, msr_index, 0, 0);
 }
+
+std::uint64_t hypercall::set_log_filter_cr3(std::uint64_t cr3_filter) {
+  hypercall_type_t call_type = hypercall_type_t::set_log_filter_cr3;
+
+  return make_hypercall(call_type, 0, cr3_filter, 0, 0);
+}
