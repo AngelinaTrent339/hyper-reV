@@ -1130,10 +1130,12 @@ CLI::App *init_syscall(CLI::App &app, CLI::Transformer &aliases_transformer) {
       app.add_subcommand("syscall", "hook individual syscalls by name")
           ->ignore_case();
 
-  // Hook a specific syscall
+  // Hook a specific syscall - don't transform, we need the original name for
+  // tracking
   auto hook_cmd =
       syscall_cmd->add_subcommand("hook", "hook a specific syscall");
-  add_transformed_command_option(hook_cmd, "target", aliases_transformer);
+  add_command_option(hook_cmd,
+                     "target"); // Keep original name, don't resolve to address
   add_command_flag(hook_cmd, "--monitor");
 
   // Unhook
