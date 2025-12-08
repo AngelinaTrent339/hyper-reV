@@ -1123,6 +1123,184 @@ void process_track(CLI::App *track) {
 }
 
 // ============================================================================
+// MSR SHADOW COMMANDS (AMD only)
+// ============================================================================
+
+// Common MSR names for convenience
+std::string get_msr_name(std::uint32_t msr_index) {
+  switch (msr_index) {
+  case 0x1D9:
+    return "IA32_DEBUGCTL";
+  case 0x174:
+    return "IA32_SYSENTER_CS";
+  case 0x175:
+    return "IA32_SYSENTER_ESP";
+  case 0x176:
+    return "IA32_SYSENTER_EIP";
+  case 0xC0000080:
+    return "IA32_EFER";
+  case 0xC0000081:
+    return "IA32_STAR";
+  case 0xC0000082:
+    return "IA32_LSTAR";
+  case 0xC0000083:
+    return "IA32_CSTAR";
+  case 0xC0000084:
+    return "IA32_FMASK";
+  case 0xC0000100:
+    return "IA32_FS_BASE";
+  case 0xC0000101:
+    return "IA32_GS_BASE";
+  case 0xC0000102:
+    return "IA32_KERNEL_GS_BASE";
+  case 0xC0000103:
+    return "IA32_TSC_AUX";
+  case 0x40000000:
+    return "HV_GUEST_OS_ID";
+  case 0x40000001:
+    return "HV_HYPERCALL";
+  case 0x40000002:
+    return "HV_VP_INDEX";
+  default:
+    return "";
+  }
+}
+
+CLI::App *init_msr(CLI::App &app) {
+  CLI::App *msr = app.add_subcommand("msr", "MSR shadowing (AMD only)")
+                      ->ignore_case()
+                      ->alias("shadow");
+
+  msr->add_subcommand("add", "add/update MSR shadow");
+  msr->add_subcommand("remove", "remove MSR shadow");
+  msr->add_subcommand("list", "list active MSR shadows");
+  msr->add_subcommand("clear", "clear all MSR shadows");
+
+  add_command_option(msr->get_subcommand("add"), "msr_index")->required();
+  add_command_option(msr->get_subcommand("add"), "shadow_value")->required();
+  add_command_option(msr->get_subcommand("remove"), "msr_index")->required();
+
+  return msr;
+}
+
+void process_msr(CLI::App *msr) {
+  auto *add_cmd = msr->get_subcommand("add");
+  auto *remove_cmd = msr->get_subcommand("remove");
+  auto *list_cmd = msr->get_subcommand("list");
+  auto *clear_cmd = msr->get_subcommand("clear");
+
+  if (*add_cmd) {
+    const std::uint64_t msr_index =
+        get_command_option<std::uint64_t>(add_cmd, "msr_index");
+    const std::uint64_t shadow_value =
+        get_command_option<std::uint64_t>(add_cmd, "shadow_value");
+
+    const std::uint64_t result = hypercall::add_msr_shadow(
+        static_cast<std::uint32_t>(msr_index), shadow_value);
+
+    if (result == 1) {
+      std::string msr_name =
+          get_msr_name(static_cast<std::uint32_t>(msr_index));
+      if (!msr_name.empty()) {
+        console::success(
+            std::format("MSR shadow added: 0x{:X} ({}) -> 0x{:016X}", msr_index,
+                        msr_name, shadow_value));
+      } else {
+        console::success(std::format("MSR shadow added: 0x{:X} -> 0x{:016X}",
+                                     msr_index, shadow_value));
+      }
+      console::info("Guest RDMSR will now return the shadow value.");
+    } else {
+      console::error("Failed to add MSR shadow",
+                     "max shadows reached or invalid MSR");
+    }
+  } else if (*remove_cmd) {
+    const std::uint64_t msr_index =
+        get_command_option<std::uint64_t>(remove_cmd, "msr_index");
+
+    const std::uint64_t result =
+        hypercall::remove_msr_shadow(static_cast<std::uint32_t>(msr_index));
+
+    if (result == 1) {
+      console::success(std::format("MSR shadow removed: 0x{:X}", msr_index));
+    } else {
+      console::error("MSR shadow not found", std::format("0x{:X}", msr_index));
+    }
+  } else if (*list_cmd) {
+    hypercall::msr_shadow_entry_t buffer[32] = {};
+    const std::uint64_t count = hypercall::get_msr_shadow_list(buffer, 32);
+
+    std::println("");
+    std::println(
+        "{}╔════════════════════════════════════════════════════════════════╗{"
+        "}",
+        console::color::cyan, console::color::reset);
+    std::println("{}║{} {}MSR SHADOW LIST{}                                   "
+                 "             {}║{}",
+                 console::color::cyan, console::color::reset,
+                 console::color::bold, console::color::reset,
+                 console::color::cyan, console::color::reset);
+    std::println(
+        "{}╚════════════════════════════════════════════════════════════════╝{"
+        "}",
+        console::color::cyan, console::color::reset);
+    std::println("");
+
+    if (count == 0) {
+      console::info("No MSR shadows are currently active.");
+      console::info("Use 'msr add <msr_index> <shadow_value>' to add one.");
+    } else {
+      std::println("  {:>12}  {:>20}  {}", "MSR Index", "Shadow Value", "Name");
+      std::println("  {:>12}  {:>20}  {}", "─────────", "────────────", "────");
+
+      for (std::uint32_t i = 0; i < count; ++i) {
+        std::string msr_name = get_msr_name(buffer[i].msr_index);
+        std::println("  {}0x{:08X}{}  {}0x{:016X}{}  {}",
+                     console::color::yellow, buffer[i].msr_index,
+                     console::color::reset, console::color::cyan,
+                     buffer[i].shadow_value, console::color::reset, msr_name);
+      }
+      std::println("");
+      console::info(std::format("Total shadows: {}", count));
+    }
+    std::println("");
+  } else if (*clear_cmd) {
+    const std::uint64_t result = hypercall::clear_all_msr_shadows();
+
+    if (result == 1) {
+      console::success("All MSR shadows cleared.");
+    } else {
+      console::error("Failed to clear MSR shadows");
+    }
+  } else {
+    console::info("MSR Shadow Commands (AMD only):");
+    std::println("");
+    std::println(
+        "  {}msr add <msr_index> <shadow_value>{}  - Add/update MSR shadow",
+        console::color::yellow, console::color::reset);
+    std::println(
+        "  {}msr remove <msr_index>{}              - Remove MSR shadow",
+        console::color::yellow, console::color::reset);
+    std::println(
+        "  {}msr list{}                            - List active shadows",
+        console::color::yellow, console::color::reset);
+    std::println(
+        "  {}msr clear{}                           - Clear all shadows",
+        console::color::yellow, console::color::reset);
+    std::println("");
+    std::println("  {}Common MSRs:{}", console::color::cyan,
+                 console::color::reset);
+    std::println("    0xC0000082  IA32_LSTAR       (SYSCALL handler address)");
+    std::println("    0xC0000080  IA32_EFER        (Extended feature enable)");
+    std::println("    0x1D9       IA32_DEBUGCTL    (Debug control)");
+    std::println("    0x40000000  HV_GUEST_OS_ID   (Hyper-V guest OS ID)");
+    std::println("");
+    console::info(
+        "When a guest reads a shadowed MSR, the shadow value is returned.");
+  }
+}
+
+// ============================================================================
 // ANALYSIS COMMANDS
 // ============================================================================
 
@@ -1331,6 +1509,9 @@ void commands::process(const std::string command) {
   CLI::App *dkm = init_dkm(app);
   CLI::App *gva = init_gva(app, aliases_transformer);
 
+  // MSR Shadow commands (AMD only)
+  CLI::App *msr = init_msr(app);
+
   try {
     app.parse(command);
 
@@ -1357,6 +1538,9 @@ void commands::process(const std::string command) {
 
     // Process CR3 tracking
     d_process_command(track);
+
+    // MSR Shadow (AMD only)
+    d_process_command(msr);
 
     // Analysis
     d_process_command(hfpc);

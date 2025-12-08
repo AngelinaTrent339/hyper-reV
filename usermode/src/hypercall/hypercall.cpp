@@ -172,3 +172,38 @@ std::uint64_t hypercall::get_tracking_status(tracking_status_t *status) {
   return make_hypercall(call_type, 0, 0,
                         reinterpret_cast<std::uint64_t>(status), 0);
 }
+
+// =============================================================================
+// MSR Shadow Hypercalls
+// =============================================================================
+
+std::uint64_t hypercall::add_msr_shadow(std::uint32_t msr_index,
+                                        std::uint64_t shadow_value) {
+  hypercall_type_t call_type = hypercall_type_t::add_msr_shadow;
+
+  // rdx = msr_index, r8 = shadow_value
+  return make_hypercall(call_type, 0, msr_index, shadow_value, 0);
+}
+
+std::uint64_t hypercall::remove_msr_shadow(std::uint32_t msr_index) {
+  hypercall_type_t call_type = hypercall_type_t::remove_msr_shadow;
+
+  return make_hypercall(call_type, 0, msr_index, 0, 0);
+}
+
+std::uint64_t hypercall::get_msr_shadow_list(msr_shadow_entry_t *buffer,
+                                             std::uint32_t max_entries) {
+  hypercall_type_t call_type = hypercall_type_t::get_msr_shadow_list;
+
+  // r8 = buffer address
+  (void)max_entries; // max_entries is for caller's buffer size, not passed to
+                     // hypervisor
+  return make_hypercall(call_type, 0, 0,
+                        reinterpret_cast<std::uint64_t>(buffer), 0);
+}
+
+std::uint64_t hypercall::clear_all_msr_shadows() {
+  hypercall_type_t call_type = hypercall_type_t::clear_all_msr_shadows;
+
+  return make_hypercall(call_type, 0, 0, 0, 0);
+}

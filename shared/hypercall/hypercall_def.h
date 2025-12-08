@@ -14,10 +14,15 @@ enum class hypercall_type_t : std::uint64_t {
   flush_logs,
   get_heap_free_page_count,
   // Process CR3 auto-tracking
-  set_tracked_pid,    // Set the PID to track - will auto-capture CR3
-  get_tracked_cr3,    // Get the captured CR3 for the tracked process
-  clear_tracked_pid,  // Clear the tracked PID and CR3
-  get_tracking_status // Get tracking status (PID, CR3, and match count)
+  set_tracked_pid,     // Set the PID to track - will auto-capture CR3
+  get_tracked_cr3,     // Get the captured CR3 for the tracked process
+  clear_tracked_pid,   // Clear the tracked PID and CR3
+  get_tracking_status, // Get tracking status (PID, CR3, and match count)
+  // MSR Shadowing (AMD only)
+  add_msr_shadow,       // Add/update MSR shadow: rdx=msr_index, r8=shadow_value
+  remove_msr_shadow,    // Remove MSR shadow: rdx=msr_index
+  get_msr_shadow_list,  // Get list of active shadows: r8=output_buffer
+  clear_all_msr_shadows // Clear all MSR shadows
 };
 
 #pragma warning(push)

@@ -9,6 +9,7 @@
 #include "../arch/arch.h"
 #include "../crt/crt.h"
 #include "../logs/logs.h"
+#include "../msr/msr_shadow.h"
 
 #include <hypercall/hypercall_def.h>
 #include <ia32-doc/ia32.hpp>
@@ -575,6 +576,74 @@ void hypercall::process(const hypercall_info_t hypercall_info,
     }
 
     trap_frame->rax = process_tracking::tracked_cr3;
+    break;
+  }
+  // =========================================================================
+  // MSR Shadow Hypercalls
+  // =========================================================================
+  case hypercall_type_t::add_msr_shadow: {
+    // rdx = MSR index
+    // r8 = shadow value
+    const std::uint32_t msr_index = static_cast<std::uint32_t>(trap_frame->rdx);
+    const std::uint64_t shadow_value = trap_frame->r8;
+
+    trap_frame->rax = msr_shadow::add_shadow(msr_index, shadow_value, 1, 0);
+    break;
+  }
+  case hypercall_type_t::remove_msr_shadow: {
+    // rdx = MSR index
+    const std::uint32_t msr_index = static_cast<std::uint32_t>(trap_frame->rdx);
+
+    trap_frame->rax = msr_shadow::remove_shadow(msr_index);
+    break;
+  }
+  case hypercall_type_t::get_msr_shadow_list: {
+    // r8 = output buffer (optional)
+    // Returns: count of active shadows
+
+    const std::uint32_t count = msr_shadow::get_shadow_count();
+
+    // If buffer provided, write the shadow entries
+    if (trap_frame->r8 != 0 && count > 0) {
+      const cr3 guest_cr3 = arch::get_guest_cr3();
+      const cr3 slat_cr3 = slat::hyperv_cr3();
+
+      // Buffer format: array of [msr_index (4 bytes), shadow_value (8 bytes)]
+      struct msr_entry_output {
+        std::uint32_t msr_index;
+        std::uint32_t padding;
+        std::uint64_t shadow_value;
+      };
+
+      const std::uint64_t guest_buffer_physical =
+          memory_manager::translate_guest_virtual_address(
+              guest_cr3, slat_cr3, {.address = trap_frame->r8});
+
+      if (guest_buffer_physical != 0) {
+        msr_entry_output *host_buffer =
+            static_cast<msr_entry_output *>(memory_manager::map_guest_physical(
+                slat_cr3, guest_buffer_physical, nullptr));
+
+        if (host_buffer != nullptr) {
+          for (std::uint32_t i = 0; i < count; ++i) {
+            const msr_shadow::entry_t *entry = msr_shadow::get_entry(i);
+            if (entry != nullptr) {
+              host_buffer[i].msr_index = entry->msr_index;
+              host_buffer[i].padding = 0;
+              host_buffer[i].shadow_value = entry->shadow_value;
+            }
+          }
+        }
+      }
+    }
+
+    trap_frame->rax = count;
+    break;
+  }
+  case hypercall_type_t::clear_all_msr_shadows: {
+    // Clear all MSR shadows
+    msr_shadow::init();
+    trap_frame->rax = 1;
     break;
   }
   default:

@@ -3,7 +3,6 @@
 #include <structures/trap_frame.h>
 #include <vector>
 
-
 namespace hypercall {
 std::uint64_t
 read_guest_physical_memory(void *guest_destination_buffer,
@@ -55,4 +54,18 @@ struct tracking_status_t {
 };
 
 std::uint64_t get_tracking_status(tracking_status_t *status);
+
+// MSR Shadow hypercalls (AMD only)
+struct msr_shadow_entry_t {
+  std::uint32_t msr_index;
+  std::uint32_t padding;
+  std::uint64_t shadow_value;
+};
+
+std::uint64_t add_msr_shadow(std::uint32_t msr_index,
+                             std::uint64_t shadow_value);
+std::uint64_t remove_msr_shadow(std::uint32_t msr_index);
+std::uint64_t get_msr_shadow_list(msr_shadow_entry_t *buffer,
+                                  std::uint32_t max_entries);
+std::uint64_t clear_all_msr_shadows();
 } // namespace hypercall

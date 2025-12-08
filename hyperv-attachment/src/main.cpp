@@ -10,6 +10,7 @@
 
 #include "crt/crt.h"
 #include "interrupts/interrupts.h"
+#include "msr/msr_shadow.h"
 #include "slat/cr3/cr3.h"
 #include "slat/slat.h"
 #include "slat/violation/violation.h"
@@ -163,6 +164,48 @@ std::uint64_t vmexit_handler_detour(std::uint64_t a1, std::uint64_t a2,
   } else if (arch::is_non_maskable_interrupt_exit(exit_reason) == 1) {
     interrupts::process_nmi();
   }
+#ifndef _INTELMACHINE
+  // AMD MSR exit handling for MSR shadowing
+  else if (exit_reason == SVM_EXIT_REASON_MSR) {
+    vmcb_t *vmcb = arch::get_vmcb();
+    if (vmcb != nullptr) {
+      // exit_info1: 0 = RDMSR, 1 = WRMSR
+      const std::uint64_t is_write = vmcb->control.first_exit_info;
+
+      // Get the MSR index from guest RCX
+      trap_frame_t *const trap_frame = *reinterpret_cast<trap_frame_t **>(a2);
+      const std::uint32_t msr_index =
+          static_cast<std::uint32_t>(trap_frame->rcx);
+
+      if (is_write == 0) {
+        // RDMSR - check if we should shadow this read
+        std::uint64_t shadow_value = 0;
+        if (msr_shadow::handle_rdmsr(msr_index, &shadow_value) == 1) {
+          // Return shadow value: low 32 bits in EAX, high 32 bits in EDX
+          vmcb->save_state.rax = shadow_value & 0xFFFFFFFF;
+          trap_frame->rdx = (shadow_value >> 32) & 0xFFFFFFFF;
+
+          // Advance RIP past the RDMSR instruction (2 bytes: 0F 32)
+          arch::advance_guest_rip();
+
+          return exit_handler(a1, a2, a3, a4);
+        }
+      } else {
+        // WRMSR - check if we should intercept this write
+        const std::uint64_t write_value =
+            (vmcb->save_state.rax & 0xFFFFFFFF) |
+            ((trap_frame->rdx & 0xFFFFFFFF) << 32);
+
+        if (msr_shadow::handle_wrmsr(msr_index, write_value) == 1) {
+          // Block the write, just advance RIP
+          arch::advance_guest_rip();
+
+          return exit_handler(a1, a2, a3, a4);
+        }
+      }
+    }
+  }
+#endif
   return reinterpret_cast<vmexit_handler_t>(original_vmexit_handler)(a1, a2, a3,
                                                                      a4);
 }
