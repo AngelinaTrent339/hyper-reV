@@ -221,7 +221,7 @@ std::uint64_t hypercall::get_msr_intercept_count() {
 }
 
 std::uint64_t hypercall::set_msr_intercept(std::uint32_t msr_index,
-                                            std::uint8_t flags) {
+                                           std::uint8_t flags) {
   hypercall_type_t call_type = hypercall_type_t::set_msr_intercept;
 
   // rdx = msr_index, r8 = flags (bit0=read, bit1=write)
@@ -233,4 +233,121 @@ std::uint64_t hypercall::get_msr_intercept_status(std::uint32_t msr_index) {
 
   // rdx = msr_index
   return make_hypercall(call_type, 0, msr_index, 0, 0);
+}
+
+// =============================================================================
+// Hidden Allocation Hypercalls
+// =============================================================================
+
+std::uint64_t hypercall::hidden_alloc_region(std::uint32_t page_count) {
+  hypercall_type_t call_type = hypercall_type_t::hidden_alloc_region;
+
+  // rdx = page_count
+  return make_hypercall(call_type, 0, page_count, 0, 0);
+}
+
+std::uint64_t hypercall::hidden_write_region(std::uint64_t region_id,
+                                             std::uint64_t offset,
+                                             const void *data,
+                                             std::uint64_t size) {
+  hypercall_type_t call_type = hypercall_type_t::hidden_write_region;
+
+  // rdx = region_id, r8 = offset, r9 = data_ptr, r10 = size
+  // Note: We use the extended hypercall mechanism for r10
+  // For now, we pass size in r9 and use a modified hypercall
+  // Implementation uses chunked writes internally
+
+  // We need to use a different approach since launch_raw_hypercall only has 3
+  // params For simplicity, split into multiple calls if needed
+  std::uint64_t bytes_written = 0;
+  std::uint64_t remaining = size;
+  const std::uint8_t *src = static_cast<const std::uint8_t *>(data);
+
+  while (remaining > 0) {
+    // Write in chunks that fit in our hypercall parameters
+    const std::uint64_t chunk_size = (remaining > 0x1000) ? 0x1000 : remaining;
+
+    // For the write, we need to pass: region_id, offset, data_ptr, size
+    // We'll encode offset and size together in call_reserved_data, data_ptr in
+    // rdx, region_id in r8 Actually, the hypervisor uses r10 which we can't
+    // pass easily Let's use a simpler encoding: rdx=region_id, r8=offset,
+    // r9=data_ptr And encode size in call_reserved_data
+
+    const std::uint64_t result =
+        make_hypercall(call_type, chunk_size, region_id, offset + bytes_written,
+                       reinterpret_cast<std::uint64_t>(src + bytes_written));
+
+    if (result == 0)
+      break;
+
+    bytes_written += result;
+    remaining -= result;
+  }
+
+  return bytes_written;
+}
+
+std::uint64_t hypercall::hidden_read_region(std::uint64_t region_id,
+                                            std::uint64_t offset, void *buffer,
+                                            std::uint64_t size) {
+  hypercall_type_t call_type = hypercall_type_t::hidden_read_region;
+
+  std::uint64_t bytes_read = 0;
+  std::uint64_t remaining = size;
+  std::uint8_t *dest = static_cast<std::uint8_t *>(buffer);
+
+  while (remaining > 0) {
+    const std::uint64_t chunk_size = (remaining > 0x1000) ? 0x1000 : remaining;
+
+    const std::uint64_t result =
+        make_hypercall(call_type, chunk_size, region_id, offset + bytes_read,
+                       reinterpret_cast<std::uint64_t>(dest + bytes_read));
+
+    if (result == 0)
+      break;
+
+    bytes_read += result;
+    remaining -= result;
+  }
+
+  return bytes_read;
+}
+
+std::uint64_t hypercall::hidden_expose_region(std::uint64_t region_id,
+                                              std::uint64_t target_va,
+                                              std::uint64_t target_cr3,
+                                              bool executable) {
+  hypercall_type_t call_type = hypercall_type_t::hidden_expose_region;
+
+  // rdx = region_id, r8 = target_va, r9 = target_cr3
+  // executable flag encoded in call_reserved_data
+  return make_hypercall(call_type, executable ? 1 : 0, region_id, target_va,
+                        target_cr3);
+}
+
+std::uint64_t hypercall::hidden_hide_region(std::uint64_t region_id) {
+  hypercall_type_t call_type = hypercall_type_t::hidden_hide_region;
+
+  return make_hypercall(call_type, 0, region_id, 0, 0);
+}
+
+std::uint64_t hypercall::hidden_free_region(std::uint64_t region_id) {
+  hypercall_type_t call_type = hypercall_type_t::hidden_free_region;
+
+  return make_hypercall(call_type, 0, region_id, 0, 0);
+}
+
+std::uint64_t hypercall::hidden_get_region_info(std::uint64_t region_id,
+                                                hidden_region_info_t *info) {
+  hypercall_type_t call_type = hypercall_type_t::hidden_get_region_info;
+
+  // rdx = region_id, r8 = output_buffer
+  return make_hypercall(call_type, 0, region_id,
+                        reinterpret_cast<std::uint64_t>(info), 0);
+}
+
+std::uint64_t hypercall::hidden_get_region_count() {
+  hypercall_type_t call_type = hypercall_type_t::hidden_get_region_count;
+
+  return make_hypercall(call_type, 0, 0, 0, 0);
 }

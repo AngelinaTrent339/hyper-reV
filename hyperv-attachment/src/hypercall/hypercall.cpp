@@ -11,6 +11,7 @@
 #include "../logs/logs.h"
 #include "../msr/msr_shadow.h"
 #include "../msr/msrpm.h"
+#include "../slat/hidden_alloc/hidden_alloc.h"
 
 #include <hypercall/hypercall_def.h>
 #include <ia32-doc/ia32.hpp>
@@ -665,7 +666,8 @@ void hypercall::process(const hypercall_info_t hypercall_info,
     const std::uint8_t flags = static_cast<std::uint8_t>(trap_frame->r8);
     const std::uint8_t intercept_read = (flags & 0x01) ? 1 : 0;
     const std::uint8_t intercept_write = (flags & 0x02) ? 1 : 0;
-    trap_frame->rax = msrpm::set_msr_intercept(msr_index, intercept_read, intercept_write);
+    trap_frame->rax =
+        msrpm::set_msr_intercept(msr_index, intercept_read, intercept_write);
     break;
   }
   case hypercall_type_t::get_msr_intercept_status: {
@@ -673,6 +675,156 @@ void hypercall::process(const hypercall_info_t hypercall_info,
     // Returns intercept flags (bit0=read, bit1=write)
     const std::uint32_t msr_index = static_cast<std::uint32_t>(trap_frame->rdx);
     trap_frame->rax = msrpm::get_msr_intercept(msr_index);
+    break;
+  }
+  // =========================================================================
+  // Hidden Allocation Hypercalls
+  // =========================================================================
+  case hypercall_type_t::hidden_alloc_region: {
+    // rdx = page_count
+    // Returns: region_id (0 = failure)
+    const std::uint32_t page_count =
+        static_cast<std::uint32_t>(trap_frame->rdx);
+    trap_frame->rax = hidden_alloc::allocate_region(page_count);
+    break;
+  }
+  case hypercall_type_t::hidden_write_region: {
+    // rdx = region_id, r8 = offset, r9 = data_ptr (guest VA), r10 = size
+    const std::uint64_t region_id = trap_frame->rdx;
+    const std::uint64_t offset = trap_frame->r8;
+    const std::uint64_t guest_data_ptr = trap_frame->r9;
+    const std::uint64_t size = trap_frame->r10;
+
+    // Translate guest VA to host VA and copy data to hidden region
+    const cr3 guest_cr3 = arch::get_guest_cr3();
+    const cr3 slat_cr3 = slat::hyperv_cr3();
+
+    // Read data from guest in chunks
+    std::uint64_t bytes_written = 0;
+    std::uint64_t remaining = size;
+
+    while (remaining > 0) {
+      const std::uint64_t chunk_size =
+          (remaining > 0x1000) ? 0x1000 : remaining;
+      const std::uint64_t guest_phys =
+          memory_manager::translate_guest_virtual_address(
+              guest_cr3, slat_cr3, {.address = guest_data_ptr + bytes_written});
+
+      if (guest_phys == 0)
+        break;
+
+      void *host_src =
+          memory_manager::map_guest_physical(slat_cr3, guest_phys, nullptr);
+      if (host_src == nullptr)
+        break;
+
+      const std::uint64_t written = hidden_alloc::write_region(
+          region_id, offset + bytes_written, host_src, chunk_size);
+      if (written == 0)
+        break;
+
+      bytes_written += written;
+      remaining -= written;
+    }
+
+    trap_frame->rax = bytes_written;
+    break;
+  }
+  case hypercall_type_t::hidden_read_region: {
+    // rdx = region_id, r8 = offset, r9 = buffer_ptr (guest VA), r10 = size
+    const std::uint64_t region_id = trap_frame->rdx;
+    const std::uint64_t offset = trap_frame->r8;
+    const std::uint64_t guest_buffer_ptr = trap_frame->r9;
+    const std::uint64_t size = trap_frame->r10;
+
+    const cr3 guest_cr3 = arch::get_guest_cr3();
+    const cr3 slat_cr3 = slat::hyperv_cr3();
+
+    std::uint64_t bytes_read = 0;
+    std::uint64_t remaining = size;
+
+    while (remaining > 0) {
+      const std::uint64_t chunk_size =
+          (remaining > 0x1000) ? 0x1000 : remaining;
+      const std::uint64_t guest_phys =
+          memory_manager::translate_guest_virtual_address(
+              guest_cr3, slat_cr3, {.address = guest_buffer_ptr + bytes_read});
+
+      if (guest_phys == 0)
+        break;
+
+      void *host_dest =
+          memory_manager::map_guest_physical(slat_cr3, guest_phys, nullptr);
+      if (host_dest == nullptr)
+        break;
+
+      const std::uint64_t read = hidden_alloc::read_region(
+          region_id, offset + bytes_read, host_dest, chunk_size);
+      if (read == 0)
+        break;
+
+      bytes_read += read;
+      remaining -= read;
+    }
+
+    trap_frame->rax = bytes_read;
+    break;
+  }
+  case hypercall_type_t::hidden_expose_region: {
+    // rdx = region_id, r8 = target_va, r9 = target_cr3, r10 = executable
+    const std::uint64_t region_id = trap_frame->rdx;
+    const std::uint64_t target_va = trap_frame->r8;
+    const std::uint64_t target_cr3 = trap_frame->r9;
+    const std::uint8_t executable = static_cast<std::uint8_t>(trap_frame->r10);
+
+    trap_frame->rax = hidden_alloc::expose_region(region_id, target_va,
+                                                  target_cr3, executable);
+    break;
+  }
+  case hypercall_type_t::hidden_hide_region: {
+    // rdx = region_id
+    const std::uint64_t region_id = trap_frame->rdx;
+    trap_frame->rax = hidden_alloc::hide_region(region_id);
+    break;
+  }
+  case hypercall_type_t::hidden_free_region: {
+    // rdx = region_id
+    const std::uint64_t region_id = trap_frame->rdx;
+    trap_frame->rax = hidden_alloc::free_region(region_id);
+    break;
+  }
+  case hypercall_type_t::hidden_get_region_info: {
+    // rdx = region_id, r8 = output_buffer (guest VA)
+    const std::uint64_t region_id = trap_frame->rdx;
+    const std::uint64_t guest_buffer = trap_frame->r8;
+
+    const hidden_alloc::hidden_region_t *region =
+        hidden_alloc::get_region(region_id);
+
+    if (region != nullptr && guest_buffer != 0) {
+      const cr3 guest_cr3 = arch::get_guest_cr3();
+      const cr3 slat_cr3 = slat::hyperv_cr3();
+
+      const std::uint64_t guest_phys =
+          memory_manager::translate_guest_virtual_address(
+              guest_cr3, slat_cr3, {.address = guest_buffer});
+
+      if (guest_phys != 0) {
+        void *host_dest =
+            memory_manager::map_guest_physical(slat_cr3, guest_phys, nullptr);
+        if (host_dest != nullptr) {
+          crt::copy_memory(host_dest, region,
+                           sizeof(hidden_alloc::hidden_region_t));
+          trap_frame->rax = 1;
+          break;
+        }
+      }
+    }
+    trap_frame->rax = 0;
+    break;
+  }
+  case hypercall_type_t::hidden_get_region_count: {
+    trap_frame->rax = hidden_alloc::get_active_region_count();
     break;
   }
   default:

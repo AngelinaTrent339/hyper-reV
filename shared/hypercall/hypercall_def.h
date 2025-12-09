@@ -26,8 +26,24 @@ enum class hypercall_type_t : std::uint64_t {
   read_msr_value, // Read MSR value (returns shadow if exists): rdx=msr_index
   get_msr_intercept_count, // Get count of MSR intercepts caught (debug)
   // MSRPM Control (AMD only) - enables actual MSR interception
-  set_msr_intercept,     // Enable/disable MSR interception: rdx=msr_index, r8=flags (bit0=read, bit1=write)
-  get_msr_intercept_status // Get current intercept status for MSR: rdx=msr_index
+  set_msr_intercept, // Enable/disable MSR interception: rdx=msr_index, r8=flags
+                     // (bit0=read, bit1=write)
+  get_msr_intercept_status, // Get current intercept status for MSR:
+                            // rdx=msr_index
+
+  // Hidden Allocation System - allocate memory invisible to guest
+  hidden_alloc_region,    // Allocate hidden region: rdx=page_count, returns
+                          // region_id
+  hidden_write_region,    // Write to hidden region: rdx=region_id, r8=offset,
+                          // r9=data_ptr, r10=size
+  hidden_read_region,     // Read from hidden region: rdx=region_id, r8=offset,
+                          // r9=buffer_ptr, r10=size
+  hidden_expose_region,   // Expose region to process: rdx=region_id,
+                          // r8=target_va, r9=target_cr3, r10=executable
+  hidden_hide_region,     // Hide exposed region: rdx=region_id
+  hidden_free_region,     // Free hidden region: rdx=region_id
+  hidden_get_region_info, // Get region info: rdx=region_id, r8=output_buffer
+  hidden_get_region_count // Get count of active regions
 };
 
 #pragma warning(push)
@@ -41,9 +57,9 @@ union hypercall_info_t {
 
   struct {
     std::uint64_t primary_key : 16;
-    hypercall_type_t call_type : 6;  // Increased from 4 to 6 bits (max 64 types)
+    hypercall_type_t call_type : 6; // Increased from 4 to 6 bits (max 64 types)
     std::uint64_t secondary_key : 7;
-    std::uint64_t call_reserved_data : 35;  // Reduced from 37 to 35
+    std::uint64_t call_reserved_data : 35; // Reduced from 37 to 35
   };
 };
 
@@ -52,11 +68,10 @@ union virt_memory_op_hypercall_info_t {
 
   struct {
     std::uint64_t primary_key : 16;
-    hypercall_type_t call_type : 6;  // Increased from 4 to 6 bits
+    hypercall_type_t call_type : 6; // Increased from 4 to 6 bits
     std::uint64_t secondary_key : 7;
     memory_operation_t memory_operation : 1;
-    std::uint64_t address_of_page_directory
-        : 34; // Reduced from 36 to 34
+    std::uint64_t address_of_page_directory : 34; // Reduced from 36 to 34
   };
 };
 
