@@ -162,9 +162,43 @@ void process_help_cmd(CLI::App *help_cmd) {
       console::color::reset);
   std::println("  {}?{}                                    - this help",
                console::color::magenta, console::color::reset);
-  std::println("  {}exit{}                                 - exit session\n",
+  std::println("  {}exit{}                                 - exit session",
                console::color::magenta, console::color::reset);
 
+  std::println("\n{}Process Tracking:{}", console::color::bold,
+               console::color::reset);
+  std::println(
+      "  {}track set \u003cname|pid\u003e{}                 - auto-capture process CR3",
+      console::color::cyan, console::color::reset);
+  std::println(
+      "  {}track status{}                         - show tracked CR3",
+      console::color::cyan, console::color::reset);
+  std::println(
+      "  {}track clear{}                          - clear tracking",
+      console::color::cyan, console::color::reset);
+
+  std::println("\n{}MSR Shadowing (AMD):{}", console::color::bold,
+               console::color::reset);
+  std::println(
+      "  {}msr add \u003cmsr\u003e \u003cvalue\u003e{}                - shadow MSR read",
+      console::color::yellow, console::color::reset);
+  std::println(
+      "  {}msr remove \u003cmsr\u003e{}                     - remove shadow",
+      console::color::yellow, console::color::reset);
+  std::println(
+      "  {}msr list{}                             - list all shadows",
+      console::color::yellow, console::color::reset);
+  std::println(
+      "  {}msr clear{}                            - clear all shadows",
+      console::color::yellow, console::color::reset);
+  std::println(
+      "  {}msr status{}                           - show intercept stats",
+      console::color::yellow, console::color::reset);
+  std::println(
+      "  {}msr intercept \u003cmsr\u003e [flags]{}          - enable MSRPM intercept",
+      console::color::yellow, console::color::reset);
+
+  std::println("");
   std::println("{}Tip:{} Use module names/exports as aliases: e.g., "
                "'ntoskrnl.exe!KeQueryPerformanceCounter'",
                console::color::dim, console::color::reset);
