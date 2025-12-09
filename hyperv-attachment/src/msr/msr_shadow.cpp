@@ -72,9 +72,13 @@ std::uint8_t msr_shadow::remove_shadow(std::uint32_t msr_index) {
     
     for (std::uint32_t i = 0; i < state.count; ++i) {
         if (state.entries[i].msr_index == msr_index) {
-            // Shift remaining entries down
+            // Shift remaining entries down - manual copy for volatile
             for (std::uint32_t j = i; j < state.count - 1; ++j) {
-                state.entries[j] = state.entries[j + 1];
+                state.entries[j].msr_index = state.entries[j + 1].msr_index;
+                state.entries[j].shadow_value = state.entries[j + 1].shadow_value;
+                state.entries[j].is_active = state.entries[j + 1].is_active;
+                state.entries[j].shadow_on_read = state.entries[j + 1].shadow_on_read;
+                state.entries[j].shadow_on_write = state.entries[j + 1].shadow_on_write;
             }
             state.count = state.count - 1;
             return 1;
