@@ -1,6 +1,7 @@
 #include "commands.h"
 #include "../hook/hook.h"
 #include "../hypercall/hypercall.h"
+#include "../inject/hidden_inject.h"
 #include "../system/system.h"
 #include "../util/console.h"
 #include "../util/disasm.h"
@@ -167,36 +168,32 @@ void process_help_cmd(CLI::App *help_cmd) {
 
   std::println("\n{}Process Tracking:{}", console::color::bold,
                console::color::reset);
-  std::println(
-      "  {}track set \u003cname|pid\u003e{}                 - auto-capture process CR3",
-      console::color::cyan, console::color::reset);
-  std::println(
-      "  {}track status{}                         - show tracked CR3",
-      console::color::cyan, console::color::reset);
-  std::println(
-      "  {}track clear{}                          - clear tracking",
-      console::color::cyan, console::color::reset);
+  std::println("  {}track set \u003cname|pid\u003e{}                 - "
+               "auto-capture process CR3",
+               console::color::cyan, console::color::reset);
+  std::println("  {}track status{}                         - show tracked CR3",
+               console::color::cyan, console::color::reset);
+  std::println("  {}track clear{}                          - clear tracking",
+               console::color::cyan, console::color::reset);
 
   std::println("\n{}MSR Shadowing (AMD):{}", console::color::bold,
                console::color::reset);
-  std::println(
-      "  {}msr add \u003cmsr\u003e \u003cvalue\u003e{}                - shadow MSR read",
-      console::color::yellow, console::color::reset);
+  std::println("  {}msr add \u003cmsr\u003e \u003cvalue\u003e{}                "
+               "- shadow MSR read",
+               console::color::yellow, console::color::reset);
   std::println(
       "  {}msr remove \u003cmsr\u003e{}                     - remove shadow",
       console::color::yellow, console::color::reset);
-  std::println(
-      "  {}msr list{}                             - list all shadows",
-      console::color::yellow, console::color::reset);
-  std::println(
-      "  {}msr clear{}                            - clear all shadows",
-      console::color::yellow, console::color::reset);
+  std::println("  {}msr list{}                             - list all shadows",
+               console::color::yellow, console::color::reset);
+  std::println("  {}msr clear{}                            - clear all shadows",
+               console::color::yellow, console::color::reset);
   std::println(
       "  {}msr status{}                           - show intercept stats",
       console::color::yellow, console::color::reset);
-  std::println(
-      "  {}msr intercept \u003cmsr\u003e [flags]{}          - enable MSRPM intercept",
-      console::color::yellow, console::color::reset);
+  std::println("  {}msr intercept \u003cmsr\u003e [flags]{}          - enable "
+               "MSRPM intercept",
+               console::color::yellow, console::color::reset);
 
   std::println("");
   std::println("{}Tip:{} Use module names/exports as aliases: e.g., "
@@ -1220,7 +1217,8 @@ CLI::App *init_msr(CLI::App &app) {
   add_command_option(msr->get_subcommand("read"), "msr_index")->required();
   add_command_option(msr->get_subcommand("test"), "msr_index")->required();
   add_command_option(msr->get_subcommand("intercept"), "msr_index")->required();
-  add_command_option(msr->get_subcommand("intercept"), "flags"); // Optional: 1=read, 2=write, 3=both, 0=disable
+  add_command_option(msr->get_subcommand("intercept"),
+                     "flags"); // Optional: 1=read, 2=write, 3=both, 0=disable
 
   return msr;
 }
@@ -1317,22 +1315,25 @@ void process_msr(CLI::App *msr) {
   } else if (*msr->get_subcommand("read")) {
     // Read MSR - shows shadow value if exists
     auto *read_cmd = msr->get_subcommand("read");
-    const std::uint64_t msr_index = get_command_option<std::uint64_t>(read_cmd, "msr_index");
-    
-    const std::uint64_t value = hypercall::read_msr_value(static_cast<std::uint32_t>(msr_index));
+    const std::uint64_t msr_index =
+        get_command_option<std::uint64_t>(read_cmd, "msr_index");
+
+    const std::uint64_t value =
+        hypercall::read_msr_value(static_cast<std::uint32_t>(msr_index));
     std::string msr_name = get_msr_name(static_cast<std::uint32_t>(msr_index));
-    
+
     std::println("");
     if (value == 0x8000000000000000ULL) {
-      console::warn(std::format("MSR 0x{:X}{} - No shadow, actual read not available",
-                                msr_index, msr_name.empty() ? "" : " (" + msr_name + ")"));
+      console::warn(std::format(
+          "MSR 0x{:X}{} - No shadow, actual read not available", msr_index,
+          msr_name.empty() ? "" : " (" + msr_name + ")"));
       console::info("Add a shadow first with 'msr add'");
     } else {
-      console::success(std::format("MSR 0x{:X}{} = {}0x{:016X}{}",
-                                   msr_index,
-                                   msr_name.empty() ? "" : " (" + msr_name + ")",
-                                   console::color::cyan, value, console::color::reset));
-      
+      console::success(
+          std::format("MSR 0x{:X}{} = {}0x{:016X}{}", msr_index,
+                      msr_name.empty() ? "" : " (" + msr_name + ")",
+                      console::color::cyan, value, console::color::reset));
+
       // Check if this is a shadow or actual value
       hypercall::msr_shadow_entry_t buffer[32] = {};
       const std::uint64_t count = hypercall::get_msr_shadow_list(buffer, 32);
@@ -1351,58 +1352,61 @@ void process_msr(CLI::App *msr) {
   } else if (*msr->get_subcommand("test")) {
     // Test MSR shadowing - add a test shadow, check intercepts, then remove
     auto *test_cmd = msr->get_subcommand("test");
-    const std::uint64_t msr_index = get_command_option<std::uint64_t>(test_cmd, "msr_index");
+    const std::uint64_t msr_index =
+        get_command_option<std::uint64_t>(test_cmd, "msr_index");
     const std::uint64_t test_value = 0xDEADBEEFCAFEBABEULL;
-    
+
     std::string msr_name = get_msr_name(static_cast<std::uint32_t>(msr_index));
-    
+
     std::println("");
     console::info(std::format("Testing MSR shadowing for 0x{:X}{}...",
-                              msr_index, msr_name.empty() ? "" : " (" + msr_name + ")"));
+                              msr_index,
+                              msr_name.empty() ? "" : " (" + msr_name + ")"));
     std::println("");
-    
+
     // Get initial intercept count
     const std::uint64_t initial_count = hypercall::get_msr_intercept_count();
-    
+
     // Add a test shadow
     const std::uint64_t add_result = hypercall::add_msr_shadow(
         static_cast<std::uint32_t>(msr_index), test_value);
-    
+
     if (add_result != 1) {
       console::error("Failed to add test shadow");
       return;
     }
-    
-    std::println("  [1] Added test shadow: 0x{:X} -> 0x{:016X}", msr_index, test_value);
-    
+
+    std::println("  [1] Added test shadow: 0x{:X} -> 0x{:016X}", msr_index,
+                 test_value);
+
     // Read it back
-    const std::uint64_t read_value = hypercall::read_msr_value(
-        static_cast<std::uint32_t>(msr_index));
-    
+    const std::uint64_t read_value =
+        hypercall::read_msr_value(static_cast<std::uint32_t>(msr_index));
+
     std::println("  [2] Read back value:   0x{:016X}", read_value);
-    
+
     // Check if it matches
     if (read_value == test_value) {
-      std::println("  [3] {}✓ Shadow value returned correctly!{}", 
+      std::println("  [3] {}✓ Shadow value returned correctly!{}",
                    console::color::green, console::color::reset);
     } else if (read_value == 0x8000000000000000ULL) {
-      std::println("  [3] {}✗ No shadow returned (MSR read not available){}", 
+      std::println("  [3] {}✗ No shadow returned (MSR read not available){}",
                    console::color::red, console::color::reset);
     } else {
-      std::println("  [3] {}? Unexpected value (may be actual MSR){}", 
+      std::println("  [3] {}? Unexpected value (may be actual MSR){}",
                    console::color::yellow, console::color::reset);
     }
-    
+
     // Check intercept count
     const std::uint64_t final_count = hypercall::get_msr_intercept_count();
     const std::uint64_t intercepts = final_count - initial_count;
-    
+
     std::println("  [4] MSR intercepts during test: {}", intercepts);
-    
+
     // Remove the test shadow
     hypercall::remove_msr_shadow(static_cast<std::uint32_t>(msr_index));
     std::println("  [5] Removed test shadow");
-    
+
     std::println("");
     if (read_value == test_value) {
       console::success("MSR shadowing is WORKING for this MSR!");
@@ -1414,11 +1418,13 @@ void process_msr(CLI::App *msr) {
   } else if (*msr->get_subcommand("status")) {
     // Show MSR intercept statistics
     const std::uint64_t intercept_count = hypercall::get_msr_intercept_count();
-    const std::uint64_t shadow_count = hypercall::get_msr_shadow_list(nullptr, 0);
-    
+    const std::uint64_t shadow_count =
+        hypercall::get_msr_shadow_list(nullptr, 0);
+
     std::println("");
     std::println(
-        "{}╔════════════════════════════════════════════════════════════════╗{}",
+        "{}╔════════════════════════════════════════════════════════════════╗{"
+        "}",
         console::color::cyan, console::color::reset);
     std::println("{}║{} {}MSR SHADOW STATUS{}                                 "
                  "             {}║{}",
@@ -1426,48 +1432,56 @@ void process_msr(CLI::App *msr) {
                  console::color::bold, console::color::reset,
                  console::color::cyan, console::color::reset);
     std::println(
-        "{}╚════════════════════════════════════════════════════════════════╝{}",
+        "{}╚════════════════════════════════════════════════════════════════╝{"
+        "}",
         console::color::cyan, console::color::reset);
     std::println("");
-    
-    std::println("  {}Active shadows:{}    {}", console::color::dim, 
+
+    std::println("  {}Active shadows:{}    {}", console::color::dim,
                  console::color::reset, shadow_count);
-    std::println("  {}Total intercepts:{} {}", console::color::dim, 
+    std::println("  {}Total intercepts:{} {}", console::color::dim,
                  console::color::reset, intercept_count);
     std::println("");
-    
+
     // Show intercept status for each shadow
     if (shadow_count > 0) {
       hypercall::msr_shadow_entry_t buffer[32] = {};
       hypercall::get_msr_shadow_list(buffer, 32);
-      
-      std::println("  {}Shadowed MSRs:{}", console::color::dim, console::color::reset);
+
+      std::println("  {}Shadowed MSRs:{}", console::color::dim,
+                   console::color::reset);
       for (std::uint32_t i = 0; i < shadow_count && i < 32; ++i) {
         std::uint32_t msr = buffer[i].msr_index;
-        std::uint64_t intercept_flags = hypercall::get_msr_intercept_status(msr);
+        std::uint64_t intercept_flags =
+            hypercall::get_msr_intercept_status(msr);
         std::string msr_name = get_msr_name(msr);
-        
+
         std::string intercept_desc;
-        if (intercept_flags == 0) intercept_desc = "NOT INTERCEPTED";
-        else if (intercept_flags == 1) intercept_desc = "RDMSR";
-        else if (intercept_flags == 2) intercept_desc = "WRMSR";
-        else intercept_desc = "RDMSR+WRMSR";
-        
-        std::println("    0x{:08X} {:20} -> 0x{:016X} [{}]",
-                     msr,
+        if (intercept_flags == 0)
+          intercept_desc = "NOT INTERCEPTED";
+        else if (intercept_flags == 1)
+          intercept_desc = "RDMSR";
+        else if (intercept_flags == 2)
+          intercept_desc = "WRMSR";
+        else
+          intercept_desc = "RDMSR+WRMSR";
+
+        std::println("    0x{:08X} {:20} -> 0x{:016X} [{}]", msr,
                      msr_name.empty() ? "" : "(" + msr_name + ")",
-                     buffer[i].shadow_value,
-                     intercept_desc);
+                     buffer[i].shadow_value, intercept_desc);
       }
       std::println("");
     }
-    
+
     if (intercept_count > 0) {
-      console::success("MSR interception is ACTIVE - shadows have been applied.");
+      console::success(
+          "MSR interception is ACTIVE - shadows have been applied.");
     } else if (shadow_count > 0) {
       console::warn("Shadows configured but no intercepts yet.");
-      console::info("Intercepts will be counted when guest reads shadowed MSRs.");
-      console::info("Note: IA32_LSTAR is rarely read - try triggering with WinDbg/driver.");
+      console::info(
+          "Intercepts will be counted when guest reads shadowed MSRs.");
+      console::info("Note: IA32_LSTAR is rarely read - try triggering with "
+                    "WinDbg/driver.");
     } else {
       console::info("No shadows configured. Use 'msr add' to add one.");
     }
@@ -1475,8 +1489,9 @@ void process_msr(CLI::App *msr) {
   } else if (*msr->get_subcommand("intercept")) {
     // Enable/disable MSR interception in MSRPM
     auto *intercept_cmd = msr->get_subcommand("intercept");
-    const std::uint64_t msr_index = get_command_option<std::uint64_t>(intercept_cmd, "msr_index");
-    
+    const std::uint64_t msr_index =
+        get_command_option<std::uint64_t>(intercept_cmd, "msr_index");
+
     // Default to 3 (both read and write) if not specified
     std::uint64_t flags = 3;
     try {
@@ -1484,41 +1499,49 @@ void process_msr(CLI::App *msr) {
     } catch (...) {
       // Use default
     }
-    
+
     std::string msr_name = get_msr_name(static_cast<std::uint32_t>(msr_index));
-    
+
     std::println("");
-    
+
     // First check current status
-    const std::uint64_t old_status = hypercall::get_msr_intercept_status(static_cast<std::uint32_t>(msr_index));
-    
+    const std::uint64_t old_status = hypercall::get_msr_intercept_status(
+        static_cast<std::uint32_t>(msr_index));
+
     // Set the new intercept status
-    const std::uint64_t result = hypercall::set_msr_intercept(
-        static_cast<std::uint32_t>(msr_index), static_cast<std::uint8_t>(flags));
-    
+    const std::uint64_t result =
+        hypercall::set_msr_intercept(static_cast<std::uint32_t>(msr_index),
+                                     static_cast<std::uint8_t>(flags));
+
     if (result == 1) {
       std::string flag_desc;
-      if (flags == 0) flag_desc = "DISABLED";
-      else if (flags == 1) flag_desc = "RDMSR only";
-      else if (flags == 2) flag_desc = "WRMSR only";
-      else flag_desc = "RDMSR+WRMSR";
-      
-      console::success(std::format("MSR 0x{:X}{} interception set to: {}",
-                                   msr_index,
-                                   msr_name.empty() ? "" : " (" + msr_name + ")",
-                                   flag_desc));
-      
+      if (flags == 0)
+        flag_desc = "DISABLED";
+      else if (flags == 1)
+        flag_desc = "RDMSR only";
+      else if (flags == 2)
+        flag_desc = "WRMSR only";
+      else
+        flag_desc = "RDMSR+WRMSR";
+
+      console::success(std::format(
+          "MSR 0x{:X}{} interception set to: {}", msr_index,
+          msr_name.empty() ? "" : " (" + msr_name + ")", flag_desc));
+
       if (old_status != flags) {
-        console::info(std::format("(Changed from flags={} to flags={})", old_status, flags));
+        console::info(std::format("(Changed from flags={} to flags={})",
+                                  old_status, flags));
       }
-      
+
       if (flags > 0) {
         console::info("Now add a shadow value with 'msr add' for this MSR.");
       }
     } else if (result == 0) {
-      console::error("Failed to set MSR intercept",
-                    "MSR may be outside controllable range or MSRPM not accessible");
-      console::info("Controllable ranges: 0x0-0x1FFF, 0xC0000000-0xC0001FFF, 0xC0010000-0xC0011FFF");
+      console::error(
+          "Failed to set MSR intercept",
+          "MSR may be outside controllable range or MSRPM not accessible");
+      console::info("Controllable ranges: 0x0-0x1FFF, 0xC0000000-0xC0001FFF, "
+                    "0xC0010000-0xC0011FFF");
     } else {
       console::warn(std::format("Unexpected result: {}", result));
     }
@@ -1538,18 +1561,18 @@ void process_msr(CLI::App *msr) {
     std::println(
         "  {}msr clear{}                           - Clear all shadows",
         console::color::yellow, console::color::reset);
-    std::println(
-        "  {}msr read <msr_index>{}                - Read MSR (shows shadow if exists)",
-        console::color::yellow, console::color::reset);
+    std::println("  {}msr read <msr_index>{}                - Read MSR (shows "
+                 "shadow if exists)",
+                 console::color::yellow, console::color::reset);
     std::println(
         "  {}msr test <msr_index>{}                - Test if shadowing works",
         console::color::yellow, console::color::reset);
     std::println(
         "  {}msr status{}                          - Show intercept statistics",
         console::color::yellow, console::color::reset);
-    std::println(
-        "  {}msr intercept <msr_index> [flags]{}   - Enable interception (flags: 0=off, 1=read, 2=write, 3=both)",
-        console::color::yellow, console::color::reset);
+    std::println("  {}msr intercept <msr_index> [flags]{}   - Enable "
+                 "interception (flags: 0=off, 1=read, 2=write, 3=both)",
+                 console::color::yellow, console::color::reset);
     std::println("");
     std::println("  {}Workflow:{}", console::color::cyan,
                  console::color::reset);
@@ -1716,6 +1739,200 @@ void process_gva(CLI::App *gva) {
 }
 
 // ============================================================================
+// HIDDEN INJECTION COMMANDS
+// ============================================================================
+
+CLI::App *init_inject(CLI::App &app) {
+  CLI::App *inject = app.add_subcommand("inject", "hidden DLL injection")
+                         ->ignore_case()
+                         ->alias("hid");
+
+  inject->add_subcommand("dll", "inject a DLL into target process");
+  inject->add_subcommand("list", "list all injected DLLs");
+  inject->add_subcommand("hide", "hide an injected DLL");
+  inject->add_subcommand("show", "re-expose a hidden DLL");
+  inject->add_subcommand("eject", "eject (unload) an injected DLL");
+  inject->add_subcommand("findcr3", "find process CR3 by name");
+
+  // inject dll <dll_path> <process_name|cr3> [--base <addr>]
+  add_command_option(inject->get_subcommand("dll"), "dll_path")->required();
+  add_command_option(inject->get_subcommand("dll"), "target")->required();
+  add_command_option(inject->get_subcommand("dll"), "--base");
+
+  // inject hide <region_id>
+  add_command_option(inject->get_subcommand("hide"), "region_id")->required();
+
+  // inject show <region_id> <cr3>
+  add_command_option(inject->get_subcommand("show"), "region_id")->required();
+  add_command_option(inject->get_subcommand("show"), "cr3")->required();
+
+  // inject eject <region_id>
+  add_command_option(inject->get_subcommand("eject"), "region_id")->required();
+
+  // inject findcr3 <process_name>
+  add_command_option(inject->get_subcommand("findcr3"), "process_name")
+      ->required();
+
+  return inject;
+}
+
+void process_inject(CLI::App *inject) {
+  auto *dll_cmd = inject->get_subcommand("dll");
+  auto *list_cmd = inject->get_subcommand("list");
+  auto *hide_cmd = inject->get_subcommand("hide");
+  auto *show_cmd = inject->get_subcommand("show");
+  auto *eject_cmd = inject->get_subcommand("eject");
+  auto *findcr3_cmd = inject->get_subcommand("findcr3");
+
+  if (*dll_cmd) {
+    const std::string dll_path =
+        get_command_option<std::string>(dll_cmd, "dll_path");
+    const std::string target =
+        get_command_option<std::string>(dll_cmd, "target");
+    const std::uint64_t base_addr =
+        get_command_option<std::uint64_t>(dll_cmd, "--base");
+
+    std::println("");
+    console::separator("Hidden DLL Injection");
+
+    // Load DLL file
+    console::info(std::format("Loading DLL: {}", dll_path));
+    std::vector<uint8_t> dll_data = hidden_inject::load_dll_file(dll_path);
+
+    if (dll_data.empty()) {
+      console::error("Failed to load DLL file", "check path and permissions");
+      return;
+    }
+
+    console::success(std::format("Loaded {} bytes", dll_data.size()));
+
+    // Validate DLL
+    if (!hidden_inject::validate_dll(dll_data)) {
+      console::error("Invalid DLL", "must be a valid x64 Windows DLL");
+      return;
+    }
+
+    // Determine target CR3
+    uint64_t target_cr3 = 0;
+
+    // Check if target is a hex number (CR3) or process name
+    if (target.size() > 2 && target[0] == '0' &&
+        (target[1] == 'x' || target[1] == 'X')) {
+      target_cr3 = std::stoull(target, nullptr, 16);
+      console::info(std::format("Using provided CR3: 0x{:X}", target_cr3));
+    } else {
+      // It's a process name, find its CR3
+      console::info(std::format("Finding CR3 for process: {}", target));
+      target_cr3 = hidden_inject::find_process_cr3(target, 10000);
+
+      if (target_cr3 == 0) {
+        console::error("Failed to find process CR3");
+        return;
+      }
+    }
+
+    // Perform injection
+    hidden_inject::injection_info_t info = {};
+    auto result = hidden_inject::inject_hidden_dll(dll_data, target_cr3,
+                                                   base_addr, false, &info);
+
+    if (result == hidden_inject::inject_result_t::success) {
+      console::success("DLL injected successfully!");
+      std::println("");
+      console::info("The DLL is now mapped in hidden memory.");
+      console::info("It is INVISIBLE to the target process and OS.");
+      console::info("Only visible when target CR3 is active.");
+      std::println("");
+      console::warn("Note: DllMain not called automatically.");
+      console::info("To execute, create a remote thread at entry point.");
+    } else {
+      console::error(
+          std::format("Injection failed with code: {}", (int)result));
+    }
+
+  } else if (*list_cmd) {
+    auto dlls = hidden_inject::get_injected_dlls();
+
+    std::println("");
+    if (dlls.empty()) {
+      console::info("No DLLs currently injected.");
+    } else {
+      console::separator("Injected DLLs");
+      std::println("  {:>4}  {:>18}  {:>18}  {:>10}  {}", "ID", "IMAGE BASE",
+                   "ENTRY POINT", "SIZE", "STATUS");
+      console::separator();
+
+      for (const auto &dll : dlls) {
+        std::println("  {:>4}  0x{:016X}  0x{:016X}  {:>10}  {}", dll.region_id,
+                     dll.image_base, dll.entry_point, dll.size_of_image,
+                     dll.is_exposed ? "EXPOSED" : "HIDDEN");
+      }
+    }
+    std::println("");
+
+  } else if (*hide_cmd) {
+    const std::uint64_t region_id =
+        get_command_option<std::uint64_t>(hide_cmd, "region_id");
+
+    auto result = hidden_inject::hide_dll(region_id);
+
+    if (result == hidden_inject::inject_result_t::success) {
+      console::success(
+          std::format("DLL {} is now HIDDEN from all processes", region_id));
+    } else {
+      console::error("Failed to hide DLL");
+    }
+
+  } else if (*show_cmd) {
+    const std::uint64_t region_id =
+        get_command_option<std::uint64_t>(show_cmd, "region_id");
+    const std::uint64_t cr3 =
+        get_command_option<std::uint64_t>(show_cmd, "cr3");
+
+    auto result = hidden_inject::expose_dll(region_id, cr3);
+
+    if (result == hidden_inject::inject_result_t::success) {
+      console::success(
+          std::format("DLL {} is now EXPOSED to CR3 0x{:X}", region_id, cr3));
+    } else {
+      console::error("Failed to expose DLL");
+    }
+
+  } else if (*eject_cmd) {
+    const std::uint64_t region_id =
+        get_command_option<std::uint64_t>(eject_cmd, "region_id");
+
+    auto result = hidden_inject::eject_dll(region_id);
+
+    if (result == hidden_inject::inject_result_t::success) {
+      console::success(
+          std::format("DLL {} ejected and memory freed", region_id));
+    } else {
+      console::error("Failed to eject DLL");
+    }
+
+  } else if (*findcr3_cmd) {
+    const std::string process_name =
+        get_command_option<std::string>(findcr3_cmd, "process_name");
+
+    std::println("");
+    console::info(std::format("Searching for process: {}", process_name));
+    console::info("Waiting for process to execute (timeout: 10s)...");
+    std::println("");
+
+    uint64_t cr3 = hidden_inject::find_process_cr3(process_name, 10000);
+
+    if (cr3 != 0) {
+      console::success(std::format("Found CR3: 0x{:X}", cr3));
+      std::println("");
+      console::info("Use this CR3 with 'inject dll' command:");
+      std::println("  inject dll <path.dll> 0x{:X}", cr3);
+    }
+    std::println("");
+  }
+}
+
+// ============================================================================
 // MAIN COMMAND PROCESSOR
 // ============================================================================
 
@@ -1781,6 +1998,9 @@ void commands::process(const std::string command) {
   // MSR Shadow commands (AMD only)
   CLI::App *msr = init_msr(app);
 
+  // Hidden DLL injection commands
+  CLI::App *inject = init_inject(app);
+
   try {
     app.parse(command);
 
@@ -1810,6 +2030,9 @@ void commands::process(const std::string command) {
 
     // MSR Shadow (AMD only)
     d_process_command(msr);
+
+    // Hidden DLL injection
+    d_process_command(inject);
 
     // Analysis
     d_process_command(hfpc);
