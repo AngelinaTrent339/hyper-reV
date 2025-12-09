@@ -406,3 +406,5 @@ dumps/dump_ntoskrnl.exe
 similar projects
 similar projects/*
 
+uefi-boot/ext/openssl
+uefi-boot/ext/openssl
