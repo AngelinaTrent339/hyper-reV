@@ -1402,12 +1402,38 @@ void process_msr(CLI::App *msr) {
                  console::color::reset, intercept_count);
     std::println("");
     
+    // Show intercept status for each shadow
+    if (shadow_count > 0) {
+      hypercall::msr_shadow_entry_t buffer[32] = {};
+      hypercall::get_msr_shadow_list(buffer, 32);
+      
+      std::println("  {}Shadowed MSRs:{}", console::color::dim, console::color::reset);
+      for (std::uint32_t i = 0; i < shadow_count && i < 32; ++i) {
+        std::uint32_t msr = buffer[i].msr_index;
+        std::uint64_t intercept_flags = hypercall::get_msr_intercept_status(msr);
+        std::string msr_name = get_msr_name(msr);
+        
+        std::string intercept_desc;
+        if (intercept_flags == 0) intercept_desc = "NOT INTERCEPTED";
+        else if (intercept_flags == 1) intercept_desc = "RDMSR";
+        else if (intercept_flags == 2) intercept_desc = "WRMSR";
+        else intercept_desc = "RDMSR+WRMSR";
+        
+        std::println("    0x{:08X} {:20} -> 0x{:016X} [{}]",
+                     msr,
+                     msr_name.empty() ? "" : "(" + msr_name + ")",
+                     buffer[i].shadow_value,
+                     intercept_desc);
+      }
+      std::println("");
+    }
+    
     if (intercept_count > 0) {
       console::success("MSR interception is ACTIVE - shadows have been applied.");
     } else if (shadow_count > 0) {
       console::warn("Shadows configured but no intercepts yet.");
       console::info("Intercepts will be counted when guest reads shadowed MSRs.");
-      console::info("Make sure to enable interception with 'msr intercept <msr> 3'");
+      console::info("Note: IA32_LSTAR is rarely read - try triggering with WinDbg/driver.");
     } else {
       console::info("No shadows configured. Use 'msr add' to add one.");
     }
