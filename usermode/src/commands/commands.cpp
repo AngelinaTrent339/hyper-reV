@@ -2,6 +2,7 @@
 #include "../hook/hook.h"
 #include "../hypercall/hypercall.h"
 #include "../inject/hidden_inject.h"
+#include "../inject/hook_exec.h"
 #include "../system/system.h"
 #include "../util/console.h"
 #include "../util/disasm.h"
@@ -1753,6 +1754,7 @@ CLI::App *init_inject(CLI::App &app) {
   inject->add_subcommand("show", "re-expose a hidden DLL");
   inject->add_subcommand("eject", "eject (unload) an injected DLL");
   inject->add_subcommand("findcr3", "find process CR3 by name");
+  inject->add_subcommand("exec", "execute DLL via hook (no thread creation)");
 
   // inject dll <dll_path> <process_name|cr3> [--base <addr>]
   add_command_option(inject->get_subcommand("dll"), "dll_path")->required();
@@ -1772,6 +1774,12 @@ CLI::App *init_inject(CLI::App &app) {
   // inject findcr3 <process_name>
   add_command_option(inject->get_subcommand("findcr3"), "process_name")
       ->required();
+
+  // inject exec <entry_point> <base> <hook_func> <cr3>
+  add_command_option(inject->get_subcommand("exec"), "entry_point")->required();
+  add_command_option(inject->get_subcommand("exec"), "base")->required();
+  add_command_option(inject->get_subcommand("exec"), "hook_func")->required();
+  add_command_option(inject->get_subcommand("exec"), "cr3")->required();
 
   return inject;
 }
@@ -1927,6 +1935,46 @@ void process_inject(CLI::App *inject) {
       std::println("");
       console::info("Use this CR3 with 'inject dll' command:");
       std::println("  inject dll <path.dll> 0x{:X}", cr3);
+    }
+    std::println("");
+
+  } else if (*inject->get_subcommand("exec")) {
+    // Execute DLL via hook (no thread creation)
+    auto *exec_cmd = inject->get_subcommand("exec");
+    const std::uint64_t entry_point =
+        get_command_option<std::uint64_t>(exec_cmd, "entry_point");
+    const std::uint64_t base =
+        get_command_option<std::uint64_t>(exec_cmd, "base");
+    const std::uint64_t hook_func =
+        get_command_option<std::uint64_t>(exec_cmd, "hook_func");
+    const std::uint64_t cr3 =
+        get_command_option<std::uint64_t>(exec_cmd, "cr3");
+
+    std::println("");
+    console::separator("Hook-Based DLL Execution");
+    console::info("This method executes your DLL WITHOUT creating threads!");
+    console::info(
+        "Instead, it hooks a game function and runs your code when called.");
+    std::println("");
+
+    console::info(std::format("DLL Entry Point: 0x{:X}", entry_point));
+    console::info(std::format("DLL Base:        0x{:X}", base));
+    console::info(std::format("Hook Function:   0x{:X}", hook_func));
+    console::info(std::format("Target CR3:      0x{:X}", cr3));
+    std::println("");
+
+    bool result = hook_exec::call_dll_entry(entry_point, base, hook_func, cr3);
+
+    if (result) {
+      console::success("Execution hook installed!");
+      std::println("");
+      console::info("Your DLL's DllMain will be called when the game");
+      console::info("next calls the hooked function.");
+      console::info("");
+      console::warn("IMPORTANT: The hook function must be one that the game");
+      console::warn("calls frequently (like a render function or game loop).");
+    } else {
+      console::error("Failed to install execution hook");
     }
     std::println("");
   }
