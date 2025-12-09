@@ -156,6 +156,9 @@
       <AdditionalDependencies>Zydis.lib;Zycore.lib;CLI11.lib;ntdll.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <UACExecutionLevel>RequireAdministrator</UACExecutionLevel>
     </Link>
+    <PostBuildEvent>
+      <Command>copy /y "$(TargetDir)*.exe" "C:\VM_Transfer\"</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="ext\portable_executable\data_directory.cpp" />

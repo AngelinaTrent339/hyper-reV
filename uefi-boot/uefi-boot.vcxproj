@@ -51,5 +51,8 @@
       <AdditionalDependencies>UefiDriverEntryPoint.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <SubSystem Condition="'$(Configuration)|$(Platform)'=='Release|x64'">EFI Application</SubSystem>
     </Link>
+    <PostBuildEvent>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">copy /y "$(TargetDir)*.efi" "C:\VM_Transfer\"</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
 </Project>
