@@ -1,10 +1,9 @@
 #include "msrpm.h"
 #include "../crt/crt.h"
 #include "../arch/amd_def.h"
+#include "../memory_manager/memory_manager.h"
 
-// We need PA to VA mapping. In the hypervisor context attached to Hyper-V,
-// we can use the host's identity mapping or physical address access.
-// Hyper-V typically uses identity-mapped physical memory in certain regions.
+// We need PA to VA mapping. Using the memory_manager module.
 
 namespace msrpm {
 
@@ -36,24 +35,22 @@ std::uint8_t* get_msrpm_va() {
         return cached_msrpm_va;
     }
     
-    // In Hyper-V's context, physical addresses are often accessible via
-    // identity mapping. The MSRPM is allocated by Hyper-V in its address space.
-    // We can try direct PA access (works in many hypervisor contexts).
-    // 
-    // Note: This is a simplification. In reality, you may need to:
-    // 1. Use MmMapIoSpace equivalent if available
-    // 2. Use NPT/EPT to map the PA temporarily
-    // 3. Use existing VA mappings that Hyper-V has
-    //
-    // For now, we assume direct PA access works (common in ring -1)
+    // Use proper PA to VA mapping through memory_manager
+    // This maps the host physical address to a usable virtual address
+    void* va = memory_manager::map_host_physical(pa);
+    if (va == nullptr) {
+        return nullptr;
+    }
+    
     cached_msrpm_pa = pa;
-    cached_msrpm_va = reinterpret_cast<std::uint8_t*>(pa);
+    cached_msrpm_va = reinterpret_cast<std::uint8_t*>(va);
     
     return cached_msrpm_va;
 #else
     return nullptr;
 #endif
 }
+
 
 std::uint8_t get_msr_position(std::uint32_t msr_index, 
                                std::uint32_t* offset_out, 
