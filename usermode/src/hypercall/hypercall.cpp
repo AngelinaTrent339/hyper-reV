@@ -219,3 +219,18 @@ std::uint64_t hypercall::get_msr_intercept_count() {
 
   return make_hypercall(call_type, 0, 0, 0, 0);
 }
+
+std::uint64_t hypercall::set_msr_intercept(std::uint32_t msr_index,
+                                            std::uint8_t flags) {
+  hypercall_type_t call_type = hypercall_type_t::set_msr_intercept;
+
+  // rdx = msr_index, r8 = flags (bit0=read, bit1=write)
+  return make_hypercall(call_type, 0, msr_index, flags, 0);
+}
+
+std::uint64_t hypercall::get_msr_intercept_status(std::uint32_t msr_index) {
+  hypercall_type_t call_type = hypercall_type_t::get_msr_intercept_status;
+
+  // rdx = msr_index
+  return make_hypercall(call_type, 0, msr_index, 0, 0);
+}

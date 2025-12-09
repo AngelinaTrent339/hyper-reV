@@ -72,4 +72,8 @@ std::uint64_t clear_all_msr_shadows();
 // MSR Debug hypercalls
 std::uint64_t read_msr_value(std::uint32_t msr_index);
 std::uint64_t get_msr_intercept_count();
+
+// MSRPM Control hypercalls (AMD only) - enables actual interception
+std::uint64_t set_msr_intercept(std::uint32_t msr_index, std::uint8_t flags);
+std::uint64_t get_msr_intercept_status(std::uint32_t msr_index);
 } // namespace hypercall

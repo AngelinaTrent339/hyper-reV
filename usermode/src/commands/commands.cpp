@@ -1178,12 +1178,15 @@ CLI::App *init_msr(CLI::App &app) {
   msr->add_subcommand("read", "read MSR value (shows shadow if exists)");
   msr->add_subcommand("test", "test if shadowing works for an MSR");
   msr->add_subcommand("status", "show MSR intercept statistics");
+  msr->add_subcommand("intercept", "enable/disable MSR interception in MSRPM");
 
   add_command_option(msr->get_subcommand("add"), "msr_index")->required();
   add_command_option(msr->get_subcommand("add"), "shadow_value")->required();
   add_command_option(msr->get_subcommand("remove"), "msr_index")->required();
   add_command_option(msr->get_subcommand("read"), "msr_index")->required();
   add_command_option(msr->get_subcommand("test"), "msr_index")->required();
+  add_command_option(msr->get_subcommand("intercept"), "msr_index")->required();
+  add_command_option(msr->get_subcommand("intercept"), "flags"); // Optional: 1=read, 2=write, 3=both, 0=disable
 
   return msr;
 }
@@ -1404,8 +1407,60 @@ void process_msr(CLI::App *msr) {
     } else if (shadow_count > 0) {
       console::warn("Shadows configured but no intercepts yet.");
       console::info("Intercepts will be counted when guest reads shadowed MSRs.");
+      console::info("Make sure to enable interception with 'msr intercept <msr> 3'");
     } else {
       console::info("No shadows configured. Use 'msr add' to add one.");
+    }
+    std::println("");
+  } else if (*msr->get_subcommand("intercept")) {
+    // Enable/disable MSR interception in MSRPM
+    auto *intercept_cmd = msr->get_subcommand("intercept");
+    const std::uint64_t msr_index = get_command_option<std::uint64_t>(intercept_cmd, "msr_index");
+    
+    // Default to 3 (both read and write) if not specified
+    std::uint64_t flags = 3;
+    try {
+      flags = get_command_option<std::uint64_t>(intercept_cmd, "flags");
+    } catch (...) {
+      // Use default
+    }
+    
+    std::string msr_name = get_msr_name(static_cast<std::uint32_t>(msr_index));
+    
+    std::println("");
+    
+    // First check current status
+    const std::uint64_t old_status = hypercall::get_msr_intercept_status(static_cast<std::uint32_t>(msr_index));
+    
+    // Set the new intercept status
+    const std::uint64_t result = hypercall::set_msr_intercept(
+        static_cast<std::uint32_t>(msr_index), static_cast<std::uint8_t>(flags));
+    
+    if (result == 1) {
+      std::string flag_desc;
+      if (flags == 0) flag_desc = "DISABLED";
+      else if (flags == 1) flag_desc = "RDMSR only";
+      else if (flags == 2) flag_desc = "WRMSR only";
+      else flag_desc = "RDMSR+WRMSR";
+      
+      console::success(std::format("MSR 0x{:X}{} interception set to: {}",
+                                   msr_index,
+                                   msr_name.empty() ? "" : " (" + msr_name + ")",
+                                   flag_desc));
+      
+      if (old_status != flags) {
+        console::info(std::format("(Changed from flags={} to flags={})", old_status, flags));
+      }
+      
+      if (flags > 0) {
+        console::info("Now add a shadow value with 'msr add' for this MSR.");
+      }
+    } else if (result == 0) {
+      console::error("Failed to set MSR intercept",
+                    "MSR may be outside controllable range or MSRPM not accessible");
+      console::info("Controllable ranges: 0x0-0x1FFF, 0xC0000000-0xC0001FFF, 0xC0010000-0xC0011FFF");
+    } else {
+      console::warn(std::format("Unexpected result: {}", result));
     }
     std::println("");
   } else {
@@ -1432,6 +1487,15 @@ void process_msr(CLI::App *msr) {
     std::println(
         "  {}msr status{}                          - Show intercept statistics",
         console::color::yellow, console::color::reset);
+    std::println(
+        "  {}msr intercept <msr_index> [flags]{}   - Enable interception (flags: 0=off, 1=read, 2=write, 3=both)",
+        console::color::yellow, console::color::reset);
+    std::println("");
+    std::println("  {}Workflow:{}", console::color::cyan,
+                 console::color::reset);
+    std::println("    1. Enable intercept: msr intercept 0xC0000082 3");
+    std::println("    2. Add shadow value: msr add 0xC0000082 0xDEADBEEF");
+    std::println("    3. Check status:     msr status");
     std::println("");
     std::println("  {}Common MSRs:{}", console::color::cyan,
                  console::color::reset);
@@ -1440,8 +1504,8 @@ void process_msr(CLI::App *msr) {
     std::println("    0x1D9       IA32_DEBUGCTL    (Debug control)");
     std::println("    0x40000000  HV_GUEST_OS_ID   (Hyper-V guest OS ID)");
     std::println("");
-    console::info(
-        "When a guest reads a shadowed MSR, the shadow value is returned.");
+    console::warn("IMPORTANT: 'msr intercept' modifies Hyper-V's MSRPM.");
+    console::info("Without enabling interception, shadows won't take effect!");
   }
 }
 

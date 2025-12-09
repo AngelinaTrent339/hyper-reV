@@ -24,7 +24,10 @@ enum class hypercall_type_t : std::uint64_t {
   get_msr_shadow_list, // Get list of active shadows: r8=output_buffer
   clear_all_msr_shadows, // Clear all MSR shadows
   read_msr_value, // Read MSR value (returns shadow if exists): rdx=msr_index
-  get_msr_intercept_count // Get count of MSR intercepts caught (debug)
+  get_msr_intercept_count, // Get count of MSR intercepts caught (debug)
+  // MSRPM Control (AMD only) - enables actual MSR interception
+  set_msr_intercept,     // Enable/disable MSR interception: rdx=msr_index, r8=flags (bit0=read, bit1=write)
+  get_msr_intercept_status // Get current intercept status for MSR: rdx=msr_index
 };
 
 #pragma warning(push)

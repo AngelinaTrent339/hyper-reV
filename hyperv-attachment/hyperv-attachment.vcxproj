@@ -189,6 +189,7 @@
     <ClCompile Include="src\slat\cr3\pte.cpp" />
     <ClCompile Include="src\slat\violation\violation.cpp" />
     <ClCompile Include="src\msr\msr_shadow.cpp" />
+    <ClCompile Include="src\msr\msrpm.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\apic\apic.h" />
@@ -215,6 +216,7 @@
     <ClInclude Include="src\slat\violation\violation.h" />
     <ClInclude Include="src\structures\virtual_address.h" />
     <ClInclude Include="src\msr\msr_shadow.h" />
+    <ClInclude Include="src\msr\msrpm.h" />
   </ItemGroup>
   <ItemGroup>
     <MASM Include="src\asm_funcs.asm" />

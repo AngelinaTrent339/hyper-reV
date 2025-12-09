@@ -10,6 +10,7 @@
 #include "../crt/crt.h"
 #include "../logs/logs.h"
 #include "../msr/msr_shadow.h"
+#include "../msr/msrpm.h"
 
 #include <hypercall/hypercall_def.h>
 #include <ia32-doc/ia32.hpp>
@@ -656,6 +657,22 @@ void hypercall::process(const hypercall_info_t hypercall_info,
   case hypercall_type_t::get_msr_intercept_count: {
     // Returns the count of MSR intercepts that returned shadow values
     trap_frame->rax = msr_shadow::get_intercept_count();
+    break;
+  }
+  case hypercall_type_t::set_msr_intercept: {
+    // rdx = MSR index, r8 = flags (bit0=read, bit1=write)
+    const std::uint32_t msr_index = static_cast<std::uint32_t>(trap_frame->rdx);
+    const std::uint8_t flags = static_cast<std::uint8_t>(trap_frame->r8);
+    const std::uint8_t intercept_read = (flags & 0x01) ? 1 : 0;
+    const std::uint8_t intercept_write = (flags & 0x02) ? 1 : 0;
+    trap_frame->rax = msrpm::set_msr_intercept(msr_index, intercept_read, intercept_write);
+    break;
+  }
+  case hypercall_type_t::get_msr_intercept_status: {
+    // rdx = MSR index
+    // Returns intercept flags (bit0=read, bit1=write)
+    const std::uint32_t msr_index = static_cast<std::uint32_t>(trap_frame->rdx);
+    trap_frame->rax = msrpm::get_msr_intercept(msr_index);
     break;
   }
   default:
